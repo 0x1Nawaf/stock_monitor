@@ -1,0 +1,17 @@
+# NASDAQ Watchlist — one ticker per line
+# Edit this file to customize your stocks
+AAPL
+MSFT
+GOOGL
+AMZN
+NVDA
+META
+TSLA
+NFLX
+AMD
+INTC
+AVGO
+COST
+PEP
+ADBE
+CRM
