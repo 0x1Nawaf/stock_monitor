@@ -115,15 +115,13 @@ def _support_resistance(df: pd.DataFrame, lookback: int = 20) -> tuple[float, fl
     return round(float(recent["Low"].min()), 2), round(float(recent["High"].max()), 2)
 
 
-def _current_indicators(df: pd.DataFrame) -> tuple[float, float, float]:
+def _current_indicators(
+    df: pd.DataFrame, features_df: pd.DataFrame
+) -> tuple[float, float, float]:
     close = df["Close"]
     sma20 = round(float(close.rolling(20).mean().iloc[-1]), 2)
     sma50 = round(float(close.rolling(50).mean().iloc[-1]), 2)
-    delta = close.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1 / 14, min_periods=14).mean()
-    loss = (-delta).clip(lower=0).ewm(alpha=1 / 14, min_periods=14).mean()
-    rs = gain / loss
-    rsi_val = round(float((100 - 100 / (1 + rs)).iloc[-1]), 1)
+    rsi_val = round(float(features_df["rsi"].iloc[-1]) * 100, 1)
     return sma20, sma50, rsi_val
 
 
@@ -149,7 +147,7 @@ def analyze(ticker: str, force_retrain: bool = False) -> StockAnalysis:
         prev_close = float(df["Close"].iloc[-2])
         change_pct = round((price - prev_close) / prev_close * 100, 2)
         support, resistance = _support_resistance(df)
-        sma20, sma50, rsi = _current_indicators(df)
+        sma20, sma50, rsi = _current_indicators(df, features_df)
 
         if price > sma20:
             reasons.append(f"Price above SMA(20) at {sma20}")

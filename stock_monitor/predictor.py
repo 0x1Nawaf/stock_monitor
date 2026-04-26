@@ -239,25 +239,23 @@ def predict(
     scaler: StandardScaler,
     features: np.ndarray,
 ) -> PredictionResult:
-    latest = scaler.transform(features[-SEQUENCE_LENGTH:])
-    x = torch.FloatTensor(latest).unsqueeze(0)
-
     model.eval()
-    with torch.no_grad():
-        primary = model(x).item()
 
-    window_preds: list[float] = []
     lookback = min(10, len(features) - SEQUENCE_LENGTH)
+    windows: list[np.ndarray] = [features[-SEQUENCE_LENGTH:]]
     for offset in range(1, lookback + 1):
-        window = features[-(SEQUENCE_LENGTH + offset) : -offset]
-        if len(window) < SEQUENCE_LENGTH:
-            continue
-        scaled_w = scaler.transform(window[-SEQUENCE_LENGTH:])
-        xw = torch.FloatTensor(scaled_w).unsqueeze(0)
-        with torch.no_grad():
-            window_preds.append(model(xw).item())
+        w = features[-(SEQUENCE_LENGTH + offset) : -offset]
+        if len(w) >= SEQUENCE_LENGTH:
+            windows.append(w[-SEQUENCE_LENGTH:])
 
-    confidence = _compute_confidence(primary, window_preds)
+    scaled_batch = np.stack([scaler.transform(w) for w in windows]).astype(np.float32)
+    x = torch.from_numpy(scaled_batch)
+
+    with torch.no_grad():
+        preds = model(x).cpu().numpy().tolist()
+
+    primary = preds[0]
+    confidence = _compute_confidence(primary, preds[1:])
 
     path = _model_path(ticker)
     age = (time.time() - path.stat().st_mtime) / 86400 if path.exists() else 0.0

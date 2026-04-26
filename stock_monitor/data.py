@@ -1,20 +1,76 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests as _requests
 
 from .config import HISTORY_PERIOD, MIN_DATA_POINTS, PREDICTION_HORIZON
 
+log = logging.getLogger(__name__)
+
+_YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 4
+
+
+def _parse_yahoo_response(data: dict) -> pd.DataFrame:
+    result = data["chart"]["result"][0]
+    timestamps = result["timestamp"]
+    quote = result["indicators"]["quote"][0]
+    adj = result["indicators"].get("adjclose", [{}])[0]
+
+    df = pd.DataFrame(
+        {
+            "Open": quote["open"],
+            "High": quote["high"],
+            "Low": quote["low"],
+            "Close": adj.get("adjclose", quote["close"]),
+            "Volume": quote["volume"],
+        },
+        index=pd.to_datetime(timestamps, unit="s"),
+    )
+    df.index.name = "Date"
+    return df.dropna(subset=["Close"])
+
 
 def fetch_stock_data(ticker: str, period: str = HISTORY_PERIOD) -> Optional[pd.DataFrame]:
-    stock = yf.Ticker(ticker)
-    df = stock.history(period=period, interval="1d")
-    if df.empty or len(df) < MIN_DATA_POINTS:
-        return None
-    return df
+    url = f"{_YAHOO_BASE}/{ticker}"
+    params = {"range": period, "interval": "1d", "includePrePost": "false"}
+
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = _requests.get(url, headers=_HEADERS, params=params, timeout=15)
+            if resp.status_code == 429:
+                wait = _BACKOFF_BASE * (attempt + 1)
+                log.warning("%s: rate limited (429), retrying in %ds", ticker, wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            df = _parse_yahoo_response(resp.json())
+            if len(df) < MIN_DATA_POINTS:
+                log.warning("%s: only %d rows (need %d)", ticker, len(df), MIN_DATA_POINTS)
+                return None
+            return df
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1:
+                wait = _BACKOFF_BASE * (attempt + 1)
+                log.warning("%s: %s, retrying in %ds", ticker, exc, wait)
+                time.sleep(wait)
+            else:
+                log.error("%s: failed after %d attempts: %s", ticker, _MAX_RETRIES, exc)
+                return None
+    return None
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -77,6 +133,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     f["return_10d"] = close.pct_change(10)
     f["return_20d"] = close.pct_change(20)
 
+    f["momentum_3"] = close / close.shift(3) - 1
+    f["momentum_7"] = close / close.shift(7) - 1
+
     f["rsi"] = _rsi(close) / 100.0
 
     macd_line, signal_line, histogram = _macd(close)
@@ -86,14 +145,17 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     f["bb_pctb"] = _bollinger_pctb(close)
 
+    sma10 = close.rolling(window=10).mean()
     sma20 = close.rolling(window=20).mean()
     sma50 = close.rolling(window=50).mean()
+    f["trend"] = (sma10 - sma20) / close
     f["price_sma20"] = close / sma20 - 1
     f["price_sma50"] = close / sma50 - 1
     f["sma20_sma50"] = sma20 / sma50 - 1
 
     vol_sma20 = volume.rolling(window=20).mean()
     f["volume_ratio"] = volume / vol_sma20
+    f["volume_change"] = volume.pct_change()
 
     f["atr_ratio"] = _atr(df) / close
 

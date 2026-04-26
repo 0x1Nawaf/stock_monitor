@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 from stock_monitor.config import WATCHLIST_PATH
@@ -84,6 +85,8 @@ def main() -> None:
     for i, ticker in enumerate(tickers, 1):
         print(f"  [{i}/{len(tickers)}] {ticker}", file=sys.stderr)
         results.append(analyze(ticker, force_retrain=args.retrain))
+        if i < len(tickers):
+            time.sleep(2)
 
     changes = detect_changes(results, previous)
     save_report(results)
