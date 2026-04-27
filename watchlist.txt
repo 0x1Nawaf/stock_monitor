@@ -1,5 +1,3 @@
-# NASDAQ Watchlist — one ticker per line
-# Edit this file to customize your stocks
 AAPL
 MSFT
 GOOGL
