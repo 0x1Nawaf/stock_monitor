@@ -18,6 +18,7 @@ from stock_monitor.report import (
     load_previous_report,
     detect_changes,
 )
+from telegram_sender.sender import sendMessage
 
 DEFAULT_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
@@ -49,7 +50,7 @@ def load_watchlist(path: Path) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="AI Stock Monitor -- LSTM prediction engine"
+        description="AI Stock Monitor -- prediction engine"
     )
     parser.add_argument(
         "tickers", nargs="*", type=str.upper,
@@ -103,7 +104,12 @@ def run_cycle(
 
     for i, ticker in enumerate(tickers, 1):
         log.info("[%d/%d] %s", i, len(tickers), ticker)
-        results.append(analyze(ticker, force_retrain=force_retrain))
+        res = analyze(ticker, force_retrain=force_retrain)
+
+        sendMessage(res)
+
+        results.append(res)
+
         if i < len(tickers):
             time.sleep(2)
 
@@ -178,7 +184,7 @@ def main() -> None:
             report_interval=args.report_interval,
         )
     else:
-        log.info("Analyzing %d tickers (LSTM engine)...", len(tickers))
+        log.info("Analyzing %d tickers (engine)...", len(tickers))
         run_cycle(
             tickers=tickers,
             force_retrain=args.retrain,
