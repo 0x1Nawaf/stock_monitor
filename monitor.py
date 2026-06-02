@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from stock_monitor.config import WATCHLIST_PATH
+from stock_monitor.config import WATCHLIST_PATH, TIMEFRAME_5D, TIMEFRAME_1D, TimeframeConfig
 from stock_monitor.analyzer import analyze
 from stock_monitor.report import (
     format_text,
@@ -65,6 +65,10 @@ def parse_args() -> argparse.Namespace:
         help="Force model retraining for all tickers",
     )
     parser.add_argument(
+        "--daily", action="store_true",
+        help="1-day predictions with live intraday prices",
+    )
+    parser.add_argument(
         "--daemon", action="store_true",
         help="Run continuously: retrain every hour, report every 3 hours",
     )
@@ -98,13 +102,14 @@ def run_cycle(
     force_retrain: bool,
     output_json: bool,
     print_report: bool,
+    timeframe: TimeframeConfig = TIMEFRAME_5D,
 ) -> None:
     previous = load_previous_report()
     results = []
 
     for i, ticker in enumerate(tickers, 1):
         log.info("[%d/%d] %s", i, len(tickers), ticker)
-        res = analyze(ticker, force_retrain=force_retrain)
+        res = analyze(ticker, force_retrain=force_retrain, timeframe=timeframe)
 
         sendMessage(res)
 
@@ -129,13 +134,14 @@ def run_daemon(
     output_json: bool,
     train_interval: int,
     report_interval: int,
+    timeframe: TimeframeConfig = TIMEFRAME_5D,
 ) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
     log.info(
-        "Daemon started: %d tickers, train every %ds, report every %ds",
-        len(tickers), train_interval, report_interval,
+        "Daemon started: %d tickers, train every %ds, report every %ds, timeframe=%s",
+        len(tickers), train_interval, report_interval, timeframe.label,
     )
 
     last_report_time = 0.0
@@ -154,6 +160,7 @@ def run_daemon(
             force_retrain=True,
             output_json=output_json,
             print_report=should_report,
+            timeframe=timeframe,
         )
 
         if should_report:
@@ -175,6 +182,7 @@ def main() -> None:
     setup_logging(args.verbose)
 
     tickers = args.tickers or load_watchlist(WATCHLIST_PATH) or DEFAULT_TICKERS
+    timeframe = TIMEFRAME_1D if args.daily else TIMEFRAME_5D
 
     if args.daemon:
         run_daemon(
@@ -182,14 +190,16 @@ def main() -> None:
             output_json=args.json,
             train_interval=args.train_interval,
             report_interval=args.report_interval,
+            timeframe=timeframe,
         )
     else:
-        log.info("Analyzing %d tickers (engine)...", len(tickers))
+        log.info("Analyzing %d tickers (%s)...", len(tickers), timeframe.label)
         run_cycle(
             tickers=tickers,
             force_retrain=args.retrain,
             output_json=args.json,
             print_report=True,
+            timeframe=timeframe,
         )
 
 

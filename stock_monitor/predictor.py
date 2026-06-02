@@ -36,33 +36,33 @@ class PredictionResult:
     model_age_days: float
 
 
-def _model_path(ticker: str) -> Path:
-    return MODELS_DIR / f"{ticker.upper()}.pt"
+def _model_path(ticker: str, models_dir: Path = MODELS_DIR) -> Path:
+    return models_dir / f"{ticker.upper()}.pt"
 
 
-def _scaler_path(ticker: str) -> Path:
-    return MODELS_DIR / f"{ticker.upper()}_scaler.npz"
+def _scaler_path(ticker: str, models_dir: Path = MODELS_DIR) -> Path:
+    return models_dir / f"{ticker.upper()}_scaler.npz"
 
 
-def _is_fresh(ticker: str) -> bool:
-    path = _model_path(ticker)
+def _is_fresh(ticker: str, models_dir: Path = MODELS_DIR) -> bool:
+    path = _model_path(ticker, models_dir)
     if not path.exists():
         return False
     age = time.time() - path.stat().st_mtime
     return age < MODEL_MAX_AGE_DAYS * 86400
 
 
-def _save_scaler(ticker: str, scaler: StandardScaler) -> None:
+def _save_scaler(ticker: str, scaler: StandardScaler, models_dir: Path = MODELS_DIR) -> None:
     np.savez(
-        _scaler_path(ticker),
+        _scaler_path(ticker, models_dir),
         mean=scaler.mean_,
         scale=scaler.scale_,
         n_features=np.array([scaler.n_features_in_]),
     )
 
 
-def _load_scaler(ticker: str) -> Optional[StandardScaler]:
-    path = _scaler_path(ticker)
+def _load_scaler(ticker: str, models_dir: Path = MODELS_DIR) -> Optional[StandardScaler]:
+    path = _scaler_path(ticker, models_dir)
     if not path.exists():
         return None
     data = np.load(path)
@@ -92,11 +92,12 @@ def _build_sequences(
 def _load_model(
     ticker: str,
     input_size: int,
+    models_dir: Path = MODELS_DIR,
 ) -> tuple[Optional[StockLSTM], Optional[StandardScaler]]:
-    path = _model_path(ticker)
+    path = _model_path(ticker, models_dir)
     if not path.exists():
         return None, None
-    scaler = _load_scaler(ticker)
+    scaler = _load_scaler(ticker, models_dir)
     if scaler is None:
         return None, None
     model = StockLSTM(
@@ -173,11 +174,13 @@ def train_model(
     features: np.ndarray,
     targets: np.ndarray,
     force: bool = False,
+    models_dir: Path = MODELS_DIR,
+    seq_len: int = SEQUENCE_LENGTH,
 ) -> tuple[StockLSTM, StandardScaler]:
     input_size = features.shape[1]
 
-    if not force and _is_fresh(ticker):
-        model, scaler = _load_model(ticker, input_size)
+    if not force and _is_fresh(ticker, models_dir):
+        model, scaler = _load_model(ticker, input_size, models_dir)
         if model is not None and scaler is not None:
             log.info("Loaded cached model for %s", ticker)
             return model, scaler
@@ -205,7 +208,7 @@ def train_model(
         scaled = scaler.fit_transform(features)
 
 
-    X, y = _build_sequences(scaled, targets, SEQUENCE_LENGTH)
+    X, y = _build_sequences(scaled, targets, seq_len)
     if len(X) < BATCH_SIZE * 2:
         raise ValueError(f"Insufficient sequences for {ticker}: got {len(X)}")
 
@@ -232,9 +235,9 @@ def train_model(
         model.load_state_dict(best_state)
     model.cpu().eval()
 
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), _model_path(ticker))
-    _save_scaler(ticker, scaler)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), _model_path(ticker, models_dir))
+    _save_scaler(ticker, scaler, models_dir)
 
     return model, scaler
 
@@ -256,15 +259,17 @@ def predict(
     model: StockLSTM,
     scaler: StandardScaler,
     features: np.ndarray,
+    models_dir: Path = MODELS_DIR,
+    seq_len: int = SEQUENCE_LENGTH,
 ) -> PredictionResult:
     model.eval()
 
-    lookback = min(10, len(features) - SEQUENCE_LENGTH)
-    windows: list[np.ndarray] = [features[-SEQUENCE_LENGTH:]]
+    lookback = min(10, len(features) - seq_len)
+    windows: list[np.ndarray] = [features[-seq_len:]]
     for offset in range(1, lookback + 1):
-        w = features[-(SEQUENCE_LENGTH + offset) : -offset]
-        if len(w) >= SEQUENCE_LENGTH:
-            windows.append(w[-SEQUENCE_LENGTH:])
+        w = features[-(seq_len + offset) : -offset]
+        if len(w) >= seq_len:
+            windows.append(w[-seq_len:])
 
     scaled_batch = np.stack([scaler.transform(w) for w in windows]).astype(np.float32)
     x = torch.from_numpy(scaled_batch)
@@ -275,7 +280,7 @@ def predict(
     primary = preds[0]
     confidence = _compute_confidence(primary, preds[1:])
 
-    path = _model_path(ticker)
+    path = _model_path(ticker, models_dir)
     age = (time.time() - path.stat().st_mtime) / 86400 if path.exists() else 0.0
 
     return PredictionResult(

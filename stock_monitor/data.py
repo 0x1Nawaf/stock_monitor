@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -69,6 +70,77 @@ def fetch_stock_data(ticker: str, period: str = HISTORY_PERIOD) -> Optional[pd.D
                 time.sleep(wait)
             else:
                 log.error("%s: failed after %d attempts: %s", ticker, _MAX_RETRIES, exc)
+                return None
+    return None
+
+
+@dataclass
+class LivePrice:
+    price: float
+    change_pct: float
+    timestamp: str
+
+
+def fetch_live_price(ticker: str) -> Optional[LivePrice]:
+    """Fetch the latest intraday price via Yahoo 1-minute bars.
+
+    Returns the most recent minute bar's close as the live price.
+    Falls back to None if intraday data is unavailable.
+    """
+    url = f"{_YAHOO_BASE}/{ticker}"
+    params = {"range": "1d", "interval": "1m", "includePrePost": "false"}
+
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = _requests.get(url, headers=_HEADERS, params=params, timeout=15)
+            if resp.status_code == 429:
+                wait = _BACKOFF_BASE * (attempt + 1)
+                log.warning("%s live: rate limited (429), retrying in %ds", ticker, wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            result = data["chart"]["result"][0]
+            meta = result.get("meta", {})
+            timestamps = result.get("timestamp")
+            quote = result["indicators"]["quote"][0]
+
+            if not timestamps or not quote.get("close"):
+                log.warning("%s: no intraday bars available", ticker)
+                return None
+
+            closes = quote["close"]
+            last_price = None
+            last_ts = None
+            for i in range(len(closes) - 1, -1, -1):
+                if closes[i] is not None:
+                    last_price = closes[i]
+                    last_ts = timestamps[i]
+                    break
+
+            if last_price is None:
+                return None
+
+            prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+            if prev_close and prev_close > 0:
+                change_pct = round((last_price - prev_close) / prev_close * 100, 2)
+            else:
+                change_pct = 0.0
+
+            ts_str = pd.Timestamp(last_ts, unit="s").strftime("%Y-%m-%d %H:%M")
+
+            return LivePrice(
+                price=round(last_price, 2),
+                change_pct=change_pct,
+                timestamp=ts_str,
+            )
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1:
+                wait = _BACKOFF_BASE * (attempt + 1)
+                log.warning("%s live: %s, retrying in %ds", ticker, exc, wait)
+                time.sleep(wait)
+            else:
+                log.error("%s live: failed after %d attempts: %s", ticker, _MAX_RETRIES, exc)
                 return None
     return None
 
@@ -177,7 +249,8 @@ def build_targets(df: pd.DataFrame, horizon: int = PREDICTION_HORIZON) -> pd.Ser
 
 def prepare_dataset(
     df: pd.DataFrame,
+    horizon: int = PREDICTION_HORIZON,
 ) -> tuple[pd.DataFrame, pd.Series]:
     features = build_features(df)
-    targets = build_targets(df).reindex(features.index)
+    targets = build_targets(df, horizon=horizon).reindex(features.index)
     return features, targets

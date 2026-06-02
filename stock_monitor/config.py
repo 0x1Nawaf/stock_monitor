@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -17,6 +18,7 @@ class Signal(Enum):
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPORTS_DIR = BASE_DIR / "reports"
 MODELS_DIR = BASE_DIR / "models"
+MODELS_DAILY_DIR = BASE_DIR / "models_daily"
 WATCHLIST_PATH = BASE_DIR / "watchlist.txt"
 
 HISTORY_PERIOD = "5y"
@@ -43,4 +45,43 @@ SIGNAL_THRESHOLDS: dict[Signal, float] = {
     Signal.STRONG_SELL: -0.04,
 }
 
+DAILY_SIGNAL_THRESHOLDS: dict[Signal, float] = {
+    Signal.STRONG_BUY: 0.015,
+    Signal.BUY: 0.008,
+    Signal.LEAN_BUY: 0.002,
+    Signal.HOLD: 0.0,
+    Signal.LEAN_SELL: -0.002,
+    Signal.SELL: -0.008,
+    Signal.STRONG_SELL: -0.015,
+}
+
 MAX_REPORT_FILES = 50
+
+
+@dataclass(frozen=True)
+class TimeframeConfig:
+    horizon: int
+    models_dir: Path
+    signal_thresholds: dict[Signal, float] = field(repr=False)
+    sequence_length: int
+    label: str
+    live_price: bool
+
+
+TIMEFRAME_5D = TimeframeConfig(
+    horizon=PREDICTION_HORIZON,
+    models_dir=MODELS_DIR,
+    signal_thresholds=SIGNAL_THRESHOLDS,
+    sequence_length=SEQUENCE_LENGTH,
+    label="5 trading days",
+    live_price=False,
+)
+
+TIMEFRAME_1D = TimeframeConfig(
+    horizon=1,
+    models_dir=MODELS_DAILY_DIR,
+    signal_thresholds=DAILY_SIGNAL_THRESHOLDS,
+    sequence_length=SEQUENCE_LENGTH,
+    label="1 trading day",
+    live_price=True,
+)

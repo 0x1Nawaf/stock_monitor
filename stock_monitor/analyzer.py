@@ -7,8 +7,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .config import Signal, SIGNAL_THRESHOLDS, PREDICTION_HORIZON
-from .data import fetch_stock_data, prepare_dataset
+from .config import Signal, SIGNAL_THRESHOLDS, PREDICTION_HORIZON, TIMEFRAME_5D, TimeframeConfig
+from .data import fetch_stock_data, fetch_live_price, prepare_dataset
 from .predictor import train_model, predict, PredictionResult
 
 log = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ class StockAnalysis:
     sma_20: float
     sma_50: float
     rsi: float
+    timeframe: str = "5d"
     error: Optional[str] = None
     reasons: list[str] = field(default_factory=list)
 
@@ -47,12 +48,13 @@ class StockAnalysis:
             "sma_20": self.sma_20,
             "sma_50": self.sma_50,
             "rsi": self.rsi,
+            "timeframe": self.timeframe,
             "reasons": self.reasons,
             "error": self.error,
         }
 
     @classmethod
-    def failed(cls, ticker: str, message: str) -> StockAnalysis:
+    def failed(cls, ticker: str, message: str, timeframe: str = "5d") -> StockAnalysis:
         return cls(
             ticker=ticker,
             price=0.0,
@@ -67,27 +69,32 @@ class StockAnalysis:
             sma_20=0.0,
             sma_50=0.0,
             rsi=0.0,
+            timeframe=timeframe,
             error=message,
         )
 
 
-def _classify(prediction: PredictionResult) -> tuple[Signal, int, list[str]]:
+def _classify(
+    prediction: PredictionResult,
+    thresholds: dict[Signal, float] = SIGNAL_THRESHOLDS,
+    horizon_label: str = "5 trading days",
+) -> tuple[Signal, int, list[str]]:
     ret = prediction.predicted_return
     conf = prediction.confidence
     adjusted = ret * conf
     reasons: list[str] = []
 
-    if adjusted >= SIGNAL_THRESHOLDS[Signal.STRONG_BUY]:
+    if adjusted >= thresholds[Signal.STRONG_BUY]:
         signal = Signal.STRONG_BUY
-    elif adjusted >= SIGNAL_THRESHOLDS[Signal.BUY]:
+    elif adjusted >= thresholds[Signal.BUY]:
         signal = Signal.BUY
-    elif adjusted >= SIGNAL_THRESHOLDS[Signal.LEAN_BUY]:
+    elif adjusted >= thresholds[Signal.LEAN_BUY]:
         signal = Signal.LEAN_BUY
-    elif adjusted <= SIGNAL_THRESHOLDS[Signal.STRONG_SELL]:
+    elif adjusted <= thresholds[Signal.STRONG_SELL]:
         signal = Signal.STRONG_SELL
-    elif adjusted <= SIGNAL_THRESHOLDS[Signal.SELL]:
+    elif adjusted <= thresholds[Signal.SELL]:
         signal = Signal.SELL
-    elif adjusted <= SIGNAL_THRESHOLDS[Signal.LEAN_SELL]:
+    elif adjusted <= thresholds[Signal.LEAN_SELL]:
         signal = Signal.LEAN_SELL
     else:
         signal = Signal.HOLD
@@ -95,7 +102,7 @@ def _classify(prediction: PredictionResult) -> tuple[Signal, int, list[str]]:
     score = int(max(-100, min(100, adjusted * 2000)))
 
     reasons.append(
-        f"We predicts {ret * 100:+.2f}% over {PREDICTION_HORIZON} days"
+        f"We predicts {ret * 100:+.2f}% over {horizon_label}"
     )
     reasons.append(f"Model confidence: {conf * 100:.0f}%")
 
@@ -125,27 +132,59 @@ def _current_indicators(
     return sma20, sma50, rsi_val
 
 
-def analyze(ticker: str, force_retrain: bool = False) -> StockAnalysis:
+def analyze(
+    ticker: str,
+    force_retrain: bool = False,
+    timeframe: TimeframeConfig = TIMEFRAME_5D,
+) -> StockAnalysis:
+    tf_key = "1d" if timeframe.horizon == 1 else f"{timeframe.horizon}d"
+
     try:
         df = fetch_stock_data(ticker)
         if df is None:
-            return StockAnalysis.failed(ticker, "Insufficient historical data")
+            return StockAnalysis.failed(ticker, "Insufficient historical data", tf_key)
 
-        features_df, targets = prepare_dataset(df)
+        features_df, targets = prepare_dataset(df, horizon=timeframe.horizon)
         valid_mask = targets.notna()
         train_features = features_df[valid_mask].values
         train_targets = targets[valid_mask].values
 
         model, scaler = train_model(
-            ticker, train_features, train_targets, force=force_retrain
+            ticker,
+            train_features,
+            train_targets,
+            force=force_retrain,
+            models_dir=timeframe.models_dir,
+            seq_len=timeframe.sequence_length,
         )
 
-        prediction = predict(ticker, model, scaler, features_df.values)
-        signal, score, reasons = _classify(prediction)
+        prediction = predict(
+            ticker,
+            model,
+            scaler,
+            features_df.values,
+            models_dir=timeframe.models_dir,
+            seq_len=timeframe.sequence_length,
+        )
+        signal, score, reasons = _classify(
+            prediction,
+            thresholds=timeframe.signal_thresholds,
+            horizon_label=timeframe.label,
+        )
 
         price = round(float(df["Close"].iloc[-1]), 2)
         prev_close = float(df["Close"].iloc[-2])
         change_pct = round((price - prev_close) / prev_close * 100, 2)
+
+        if timeframe.live_price:
+            live = fetch_live_price(ticker)
+            if live is not None:
+                price = live.price
+                change_pct = live.change_pct
+                reasons.append(f"Live price as of {live.timestamp}")
+            else:
+                reasons.append("Live price unavailable, using last daily close")
+
         support, resistance = _support_resistance(df)
         sma20, sma50, rsi = _current_indicators(df, features_df)
 
@@ -178,8 +217,9 @@ def analyze(ticker: str, force_retrain: bool = False) -> StockAnalysis:
             sma_20=sma20,
             sma_50=sma50,
             rsi=rsi,
+            timeframe=tf_key,
             reasons=reasons,
         )
     except Exception as exc:
         log.exception("Failed to analyze %s", ticker)
-        return StockAnalysis.failed(ticker, str(exc))
+        return StockAnalysis.failed(ticker, str(exc), tf_key)

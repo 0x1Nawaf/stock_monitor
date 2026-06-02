@@ -5,7 +5,7 @@ def sendMessage(res):
     bot_token = config.env_config["telegram_bot_token"]
     chat_id = config.env_config["telegram_chat_id"]
 
-    
+    tf_label = "1-day" if getattr(res, "timeframe", "5d") == "1d" else "5-day"
     message = (
         "📈 **Stock Update**\n\n"
         f"✨ **Ticker:** {res.ticker}\n"
@@ -13,6 +13,7 @@ def sendMessage(res):
         f"🔔 **Signal:** {res.signal.value}\n"
         f"🚀 **Change:** {res.change_pct}%\n"
         f"💪 **Confidence:** {res.confidence * 100:.0f}%\n"
+        f"📊 **Prediction:** {tf_label}\n"
         "📣 *Stay informed and invest wisely!*"
     )
 

@@ -142,8 +142,9 @@ def format_text(
         lines.append(
             f"  Support: ${r.support}  Resistance: ${r.resistance}"
         )
+        horizon_label = "1 day" if r.timeframe == "1d" else f"{r.timeframe.rstrip('d')} days"
         lines.append(
-            f"  Predicted {r.predicted_return_pct:+.2f}% over 5 days  "
+            f"  Predicted {r.predicted_return_pct:+.2f}% over {horizon_label}  "
             f"(confidence {r.confidence * 100:.0f}%)"
         )
         for reason in r.reasons:
@@ -156,8 +157,9 @@ def format_text(
             lines.append(f"  {r.ticker}: {r.error}")
 
     lines.append("")
+    tf = "1 trading day" if any(r.timeframe == "1d" for r in valid) else "5 trading days"
     lines.append("-" * 72)
-    lines.append("Engine: Neural Network | Prediction horizon: 5 trading days")
+    lines.append(f"Engine: Neural Network | Prediction horizon: {tf}")
     lines.append("Not financial advice. Do your own research.")
 
     return "\n".join(lines)
