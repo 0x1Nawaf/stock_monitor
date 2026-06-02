@@ -18,7 +18,7 @@ from stock_monitor.report import (
     load_previous_report,
     detect_changes,
 )
-from telegram_sender.sender import sendMessage
+from telegram_sender.sender import sendMessage, sendNewsMessage
 
 DEFAULT_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
@@ -67,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--daily", action="store_true",
         help="1-day predictions with live intraday prices",
+    )
+    parser.add_argument(
+        "--news", action="store_true",
+        help="Scan news for stocks likely to gain 5%+",
     )
     parser.add_argument(
         "--daemon", action="store_true",
@@ -177,9 +181,27 @@ def run_daemon(
     log.info("Daemon stopped after %d cycles", cycle)
 
 
+def run_news(output_json: bool) -> None:
+    from stock_monitor.news import scan_news, format_news_text, format_news_json
+
+    movers = scan_news()
+
+    sendNewsMessage(movers)
+
+    if output_json:
+        print(format_news_json(movers))
+    else:
+        print(format_news_text(movers))
+    sys.stdout.flush()
+
+
 def main() -> None:
     args = parse_args()
     setup_logging(args.verbose)
+
+    if args.news:
+        run_news(output_json=args.json)
+        return
 
     tickers = args.tickers or load_watchlist(WATCHLIST_PATH) or DEFAULT_TICKERS
     timeframe = TIMEFRAME_1D if args.daily else TIMEFRAME_5D
