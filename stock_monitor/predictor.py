@@ -184,8 +184,26 @@ def train_model(
 
     log.info("Training model for %s (%d samples, %d features)", ticker, len(features), input_size)
 
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(features)
+    X = np.asarray(features)
+
+    if not np.isfinite(X).all():
+        log.warning("Features Are Infinte Fixing it...")
+        
+        finite_vals = X[np.isfinite(X)]
+        vmin = np.nanpercentile(finite_vals, 1)
+        vmax = np.nanpercentile(finite_vals, 99)
+        inf_mask = ~np.isfinite(X)
+        X[inf_mask] = np.sign(X[inf_mask]) * vmax
+        X = np.clip(X, vmin, vmax)
+     
+        scaler = StandardScaler()
+        scaled = scaler.fit_transform(X)
+        log.warning("Fixed !")
+
+    else:
+        scaler = StandardScaler()
+        scaled = scaler.fit_transform(features)
+
 
     X, y = _build_sequences(scaled, targets, SEQUENCE_LENGTH)
     if len(X) < BATCH_SIZE * 2:

@@ -82,7 +82,7 @@ def format_text(
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = [
-        "STOCK MONITOR -- LSTM AI Engine",
+        "STOCK MONITOR -- AI Engine",
         now,
         "",
     ]
@@ -157,7 +157,7 @@ def format_text(
 
     lines.append("")
     lines.append("-" * 72)
-    lines.append("Engine: LSTM Neural Network | Prediction horizon: 5 trading days")
+    lines.append("Engine: Neural Network | Prediction horizon: 5 trading days")
     lines.append("Not financial advice. Do your own research.")
 
     return "\n".join(lines)

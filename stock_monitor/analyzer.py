@@ -95,7 +95,7 @@ def _classify(prediction: PredictionResult) -> tuple[Signal, int, list[str]]:
     score = int(max(-100, min(100, adjusted * 2000)))
 
     reasons.append(
-        f"LSTM predicts {ret * 100:+.2f}% over {PREDICTION_HORIZON} days"
+        f"We predicts {ret * 100:+.2f}% over {PREDICTION_HORIZON} days"
     )
     reasons.append(f"Model confidence: {conf * 100:.0f}%")
 
