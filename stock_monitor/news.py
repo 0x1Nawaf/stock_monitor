@@ -7,9 +7,12 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import requests as _requests
+
+from .config import MODELS_DIR
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +24,8 @@ _HEADERS = {
     ),
 }
 _TIMEOUT = 15
+_TICKER_CACHE_PATH = MODELS_DIR / "ticker_list.json"
+_TICKER_CACHE_MAX_AGE = 7 * 86400
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -54,10 +59,10 @@ class NewsMover:
 
 
 # ---------------------------------------------------------------------------
-# Company name -> ticker mapping (~100 major companies)
+# Fallback company name -> ticker mapping (used when NASDAQ download fails)
 # ---------------------------------------------------------------------------
 
-COMPANY_TICKERS: dict[str, str] = {
+_FALLBACK_TICKERS: dict[str, str] = {
     "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
     "amazon": "AMZN", "nvidia": "NVDA", "meta": "META", "facebook": "META",
     "tesla": "TSLA", "netflix": "NFLX", "amd": "AMD", "intel": "INTC",
@@ -95,13 +100,192 @@ COMPANY_TICKERS: dict[str, str] = {
     "3m": "MMM", "honeywell": "HON", "general electric": "GE",
     "t-mobile": "TMUS", "at&t": "T", "verizon": "VZ",
     "comcast": "CMCSA", "charter": "CHTR",
+    "carvana": "CVNA", "soundhound": "SOUN", "super micro": "SMCI",
+    "supermicro": "SMCI", "c3.ai": "AI", "bigbear.ai": "BBAI",
+    "symbotic": "SYM", "joby": "JOBY", "lilium": "LILM",
+    "rocket lab": "RKLB", "virgin galactic": "SPCE",
+    "draftkings": "DKNG", "celsius": "CELH", "duolingo": "DUOL",
 }
 
 _TICKER_RE = re.compile(r"\$([A-Z]{1,5})\b")
-_COMPANY_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE), ticker)
-    for name, ticker in COMPANY_TICKERS.items()
-]
+
+_NAME_STRIP_RE = re.compile(
+    r",?\s*\b(Inc\.?|Corp\.?|Corporation|Ltd\.?|Limited|Co\.?|Company|Holdings?"
+    r"|Group|Plc\.?|N\.?V\.?|S\.?A\.?|SE|AG|Class\s+[A-Z]|Common\s+Stock"
+    r"|Ordinary\s+Shares?|Depositary\s+Shares?|American\s+Depositary"
+    r"|Warrant[s]?|Right[s]?|Unit[s]?)\b\.?",
+    re.IGNORECASE,
+)
+
+# Short ticker symbols that are also common English words -- require $-prefix
+_AMBIGUOUS_TICKERS: set[str] = {
+    "A", "AN", "ALL", "AM", "ARE", "AT", "BE", "BIG", "CAN",
+    "CAR", "DAY", "DD", "DO", "E", "F", "FOR", "GO", "HAS",
+    "HE", "IT", "K", "LOW", "MAN", "MAY", "MO", "NOW", "ON",
+    "ONE", "OUT", "PAY", "RUN", "SO", "SUN", "T", "THE", "TOO",
+    "TWO", "U", "V", "W", "X", "Y", "Z",
+}
+
+
+# ---------------------------------------------------------------------------
+# Dynamic ticker list from NASDAQ
+# ---------------------------------------------------------------------------
+
+def _load_ticker_list() -> dict[str, str]:
+    """Download or load cached full US stock listing from NASDAQ API.
+
+    Returns a raw mapping of {ticker: company_name}.
+    Cached to disk for 7 days.
+    """
+    if _TICKER_CACHE_PATH.exists():
+        age = time.time() - _TICKER_CACHE_PATH.stat().st_mtime
+        if age < _TICKER_CACHE_MAX_AGE:
+            try:
+                data = json.loads(_TICKER_CACHE_PATH.read_text())
+                if data:
+                    log.info("Loaded %d tickers from cache", len(data))
+                    return data
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    log.info("Downloading full US stock listing from NASDAQ...")
+    raw: dict[str, str] = {}
+
+    for exchange in ("nasdaq", "nyse", "amex"):
+        url = (
+            f"https://api.nasdaq.com/api/screener/stocks"
+            f"?tableonly=true&limit=10000&exchange={exchange}"
+        )
+        try:
+            resp = _requests.get(url, headers=_HEADERS, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = payload.get("data", {}).get("table", {}).get("rows", [])
+            for row in rows:
+                sym = (row.get("symbol") or "").strip().upper()
+                name = (row.get("name") or "").strip()
+                if sym and name and "/" not in sym and "^" not in sym:
+                    raw[sym] = name
+            log.info("  %s: %d tickers", exchange.upper(), len(rows))
+        except Exception as exc:
+            log.warning("Failed to fetch %s listing: %s", exchange, exc)
+        time.sleep(0.3)
+
+    if raw:
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        _TICKER_CACHE_PATH.write_text(json.dumps(raw))
+        log.info("Cached %d tickers to %s", len(raw), _TICKER_CACHE_PATH)
+    else:
+        log.warning("NASDAQ download returned 0 tickers, using fallback only")
+
+    return raw
+
+
+def _build_ticker_lookup(raw_list: dict[str, str]) -> dict[str, str]:
+    """Build a name->ticker lookup dict from the NASDAQ download.
+
+    Produces entries like:
+        "carvana" -> "CVNA"
+        "advanced micro devices" -> "AMD"
+        "amd" -> "AMD"
+    """
+    lookup: dict[str, str] = {}
+
+    for ticker, full_name in raw_list.items():
+        cleaned = _NAME_STRIP_RE.sub("", full_name).strip().rstrip(",").strip()
+        lower = cleaned.lower()
+        if lower:
+            lookup[lower] = ticker
+
+        parts = lower.split()
+        if len(parts) > 1:
+            first_word = parts[0]
+            if len(first_word) >= 4:
+                lookup[first_word] = ticker
+
+        ticker_lower = ticker.lower()
+        if ticker_lower not in lookup:
+            lookup[ticker_lower] = ticker
+
+    for name, ticker in _FALLBACK_TICKERS.items():
+        if name not in lookup:
+            lookup[name] = ticker
+
+    log.info("Built ticker lookup with %d entries", len(lookup))
+    return lookup
+
+
+def _compile_patterns(
+    lookup: dict[str, str],
+) -> list[tuple[re.Pattern, str]]:
+    """Compile regex patterns for all lookup entries.
+
+    Multi-word names get word-boundary matching.
+    Single short names that could be ambiguous are skipped (handled by $TICKER regex).
+    """
+    patterns: list[tuple[re.Pattern, str]] = []
+    seen_tickers: dict[str, str] = {}
+
+    sorted_names = sorted(lookup.keys(), key=len, reverse=True)
+
+    for name in sorted_names:
+        ticker = lookup[name]
+        if ticker in seen_tickers:
+            existing = seen_tickers[ticker]
+            if len(name) <= len(existing):
+                continue
+
+        words = name.split()
+        if len(words) == 1 and len(name) <= 3:
+            continue
+        if name.upper() in _AMBIGUOUS_TICKERS:
+            continue
+
+        try:
+            pat = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
+            patterns.append((pat, ticker))
+            seen_tickers[ticker] = name
+        except re.error:
+            continue
+
+    return patterns
+
+
+# Module-level state, populated lazily in scan_news()
+_ticker_lookup: dict[str, str] = {}
+_ticker_patterns: list[tuple[re.Pattern, str]] = []
+_all_valid_tickers: set[str] = set()
+
+
+def _ensure_ticker_data() -> None:
+    """Load ticker list and compile patterns (once per process)."""
+    global _ticker_lookup, _ticker_patterns, _all_valid_tickers
+    if _ticker_patterns:
+        return
+    raw = _load_ticker_list()
+    _ticker_lookup = _build_ticker_lookup(raw)
+    _ticker_patterns = _compile_patterns(_ticker_lookup)
+    _all_valid_tickers = set(raw.keys()) | set(_FALLBACK_TICKERS.values())
+
+
+# ---------------------------------------------------------------------------
+# Ticker extraction (dynamic)
+# ---------------------------------------------------------------------------
+
+def _extract_tickers(text: str) -> list[str]:
+    tickers: set[str] = set()
+
+    for m in _TICKER_RE.finditer(text):
+        sym = m.group(1)
+        if sym in _all_valid_tickers:
+            tickers.add(sym)
+
+    for pattern, ticker in _ticker_patterns:
+        if pattern.search(text):
+            tickers.add(ticker)
+
+    return sorted(tickers)
+
 
 # ---------------------------------------------------------------------------
 # Keyword scoring engine
@@ -170,16 +354,6 @@ def _score_text(text: str) -> float:
     return score
 
 
-def _extract_tickers(text: str) -> list[str]:
-    tickers: set[str] = set()
-    for m in _TICKER_RE.finditer(text):
-        tickers.add(m.group(1))
-    for pattern, ticker in _COMPANY_PATTERNS:
-        if pattern.search(text):
-            tickers.add(ticker)
-    return sorted(tickers)
-
-
 def _predicted_gain(aggregate_score: float) -> float:
     for threshold, gain in SCORE_TO_GAIN:
         if aggregate_score >= threshold:
@@ -199,7 +373,7 @@ def _deduplicate(items: list[NewsItem]) -> list[NewsItem]:
 
 
 # ---------------------------------------------------------------------------
-# Fetchers
+# Fetchers -- RSS
 # ---------------------------------------------------------------------------
 
 def _fetch_rss(url: str, source_name: str) -> list[NewsItem]:
@@ -259,14 +433,26 @@ def fetch_google_news() -> list[NewsItem]:
     return items
 
 
-def fetch_finviz_news() -> list[NewsItem]:
-    items: list[NewsItem] = []
+# ---------------------------------------------------------------------------
+# Fetchers -- Finviz
+# ---------------------------------------------------------------------------
+
+def _get_bs4():
     try:
         from bs4 import BeautifulSoup
+        return BeautifulSoup
     except ImportError:
-        log.warning("beautifulsoup4 not installed, skipping Finviz source")
-        return items
+        log.warning("beautifulsoup4 not installed, Finviz sources unavailable")
+        return None
 
+
+def fetch_finviz_news() -> list[NewsItem]:
+    """Scrape the Finviz general news page."""
+    BeautifulSoup = _get_bs4()
+    if BeautifulSoup is None:
+        return []
+
+    items: list[NewsItem] = []
     url = "https://finviz.com/news.ashx"
     try:
         resp = _requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
@@ -298,34 +484,140 @@ def fetch_finviz_news() -> list[NewsItem]:
     return items
 
 
+def fetch_finviz_screener() -> list[NewsItem]:
+    """Scrape Finviz signal pages: top gainers, new highs, most active.
+
+    These pages have tickers explicitly in the table rows, so we get
+    ticker-tagged news without needing name-based extraction.
+    """
+    BeautifulSoup = _get_bs4()
+    if BeautifulSoup is None:
+        return []
+
+    signals = [
+        ("ta_topgainers", "finviz-gainers"),
+        ("ta_newhigh", "finviz-newhigh"),
+        ("ta_mostactive", "finviz-active"),
+    ]
+    items: list[NewsItem] = []
+
+    for signal_id, source_label in signals:
+        url = f"https://finviz.com/screener.ashx?v=340&s={signal_id}"
+        try:
+            resp = _requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            table = soup.find("table", class_="screener_table") or soup.find("table", id="screener-views-table")
+            if table is None:
+                for t in soup.find_all("table"):
+                    if t.find("a", class_="screener-link-primary"):
+                        table = t
+                        break
+            if table is None:
+                log.debug("No screener table found for %s", signal_id)
+                continue
+
+            for row in table.find_all("tr")[1:]:
+                cells = row.find_all("td")
+                if len(cells) < 2:
+                    continue
+
+                ticker_link = cells[1].find("a") if len(cells) > 1 else None
+                if ticker_link is None:
+                    ticker_link = row.find("a", class_="screener-link-primary")
+                if ticker_link is None:
+                    continue
+
+                ticker = ticker_link.get_text(strip=True).upper()
+                if not ticker or not ticker.isalpha():
+                    continue
+
+                company_cell = cells[2] if len(cells) > 2 else None
+                company_name = company_cell.get_text(strip=True) if company_cell else ticker
+
+                headline = f"{company_name} ({ticker}) on {source_label.replace('finviz-', '')} signal"
+                score = _score_text(headline)
+                if score <= 0:
+                    score = 3.0
+
+                items.append(NewsItem(
+                    headline=headline,
+                    source=source_label,
+                    url=url,
+                    tickers=[ticker],
+                    score=score,
+                ))
+        except Exception as exc:
+            log.warning("Failed to fetch Finviz screener %s: %s", signal_id, exc)
+        time.sleep(0.5)
+
+    log.info("Fetched %d items from Finviz screener pages", len(items))
+    return items
+
+
+def fetch_finviz_ticker_news(ticker: str) -> list[NewsItem]:
+    """Fetch news headlines for a specific ticker from its Finviz quote page."""
+    BeautifulSoup = _get_bs4()
+    if BeautifulSoup is None:
+        return []
+
+    items: list[NewsItem] = []
+    url = f"https://finviz.com/quote.ashx?t={ticker.upper()}"
+    try:
+        resp = _requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        news_table = soup.find("table", id="news-table")
+        if news_table is None:
+            for t in soup.find_all("table"):
+                rows = t.find_all("tr")
+                if rows and rows[0].find("a") and len(rows) > 3:
+                    first_link = rows[0].find("a")
+                    if first_link and first_link.get("href", "").startswith("http"):
+                        news_table = t
+                        break
+        if news_table is None:
+            return items
+
+        for row in news_table.find_all("tr"):
+            link = row.find("a")
+            if link is None:
+                continue
+            headline = link.get_text(strip=True)
+            href = link.get("href", "")
+            if not headline:
+                continue
+            score = _score_text(headline)
+            items.append(NewsItem(
+                headline=headline,
+                source=f"finviz-{ticker.lower()}",
+                url=href,
+                tickers=[ticker.upper()],
+                score=score,
+            ))
+    except Exception as exc:
+        log.warning("Failed to fetch Finviz ticker news for %s: %s", ticker, exc)
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Aggregation and main entry point
 # ---------------------------------------------------------------------------
 
-def scan_news() -> list[NewsMover]:
-    """Fetch news from all sources, score, aggregate, return movers >= 5%."""
-    log.info("Fetching news from Yahoo Finance...")
-    yahoo = fetch_yahoo_news()
-    log.info("Fetched %d headlines from Yahoo", len(yahoo))
-
-    log.info("Fetching news from Google News...")
-    google = fetch_google_news()
-    log.info("Fetched %d headlines from Google News", len(google))
-
-    log.info("Fetching news from Finviz...")
-    finviz = fetch_finviz_news()
-    log.info("Fetched %d headlines from Finviz", len(finviz))
-
-    all_items = _deduplicate(yahoo + google + finviz)
-    log.info("Total unique headlines: %d", len(all_items))
-
+def _aggregate_movers(all_items: list[NewsItem]) -> dict[str, list[NewsItem]]:
+    """Group positive-scoring items by ticker."""
     ticker_items: dict[str, list[NewsItem]] = {}
     for item in all_items:
         if item.score <= 0:
             continue
         for ticker in item.tickers:
             ticker_items.setdefault(ticker, []).append(item)
+    return ticker_items
 
+
+def _build_movers(ticker_items: dict[str, list[NewsItem]]) -> list[NewsMover]:
     movers: list[NewsMover] = []
     for ticker, items in ticker_items.items():
         agg_score = sum(it.score for it in items)
@@ -345,6 +637,71 @@ def scan_news() -> list[NewsMover]:
         ))
 
     movers.sort(key=lambda m: m.news_score, reverse=True)
+    return movers
+
+
+def scan_news() -> list[NewsMover]:
+    """Fetch news from all sources, score, aggregate, return movers >= 5%.
+
+    Two-pass approach:
+      Pass 1: Fetch from RSS + Finviz general + Finviz screener, identify candidates.
+      Pass 2: For each candidate ticker, fetch its dedicated Finviz page for
+              additional headlines, then re-aggregate.
+    """
+    _ensure_ticker_data()
+
+    # --- Pass 1: broad fetch ---
+    log.info("Fetching news from Yahoo Finance...")
+    yahoo = fetch_yahoo_news()
+    log.info("Fetched %d headlines from Yahoo", len(yahoo))
+
+    log.info("Fetching news from Google News...")
+    google = fetch_google_news()
+    log.info("Fetched %d headlines from Google News", len(google))
+
+    log.info("Fetching news from Finviz general...")
+    finviz_gen = fetch_finviz_news()
+    log.info("Fetched %d headlines from Finviz general", len(finviz_gen))
+
+    log.info("Fetching news from Finviz screener pages...")
+    finviz_screen = fetch_finviz_screener()
+    log.info("Fetched %d items from Finviz screener", len(finviz_screen))
+
+    pass1_items = _deduplicate(yahoo + google + finviz_gen + finviz_screen)
+    log.info("Pass 1 unique headlines: %d", len(pass1_items))
+
+    pass1_ticker_items = _aggregate_movers(pass1_items)
+
+    # Candidate tickers: any ticker with aggregate score > 0
+    candidate_tickers = {
+        t for t, items in pass1_ticker_items.items()
+        if sum(it.score for it in items) > 0
+    }
+    log.info("Pass 1 candidate tickers: %d", len(candidate_tickers))
+
+    # --- Pass 2: per-ticker deep fetch ---
+    extra_items: list[NewsItem] = []
+    fetched = 0
+    for ticker in sorted(candidate_tickers):
+        if fetched >= 25:
+            log.info("Per-ticker fetch limit reached (25), stopping")
+            break
+        log.debug("Fetching Finviz per-ticker news for %s", ticker)
+        ticker_news = fetch_finviz_ticker_news(ticker)
+        if ticker_news:
+            extra_items.extend(ticker_news)
+            fetched += 1
+        time.sleep(0.3)
+
+    if extra_items:
+        log.info("Pass 2: fetched %d extra headlines for %d tickers", len(extra_items), fetched)
+
+    all_items = _deduplicate(pass1_items + extra_items)
+    log.info("Total unique headlines after pass 2: %d", len(all_items))
+
+    ticker_items = _aggregate_movers(all_items)
+    movers = _build_movers(ticker_items)
+
     log.info("Found %d news movers with predicted gain >= 5%%", len(movers))
     return movers
 
