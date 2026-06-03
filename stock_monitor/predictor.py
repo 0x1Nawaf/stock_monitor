@@ -44,12 +44,16 @@ def _scaler_path(ticker: str, models_dir: Path = MODELS_DIR) -> Path:
     return models_dir / f"{ticker.upper()}_scaler.npz"
 
 
-def _is_fresh(ticker: str, models_dir: Path = MODELS_DIR) -> bool:
+def _is_fresh(
+    ticker: str,
+    models_dir: Path = MODELS_DIR,
+    max_age_days: int = MODEL_MAX_AGE_DAYS,
+) -> bool:
     path = _model_path(ticker, models_dir)
     if not path.exists():
         return False
     age = time.time() - path.stat().st_mtime
-    return age < MODEL_MAX_AGE_DAYS * 86400
+    return age < max_age_days * 86400
 
 
 def _save_scaler(ticker: str, scaler: StandardScaler, models_dir: Path = MODELS_DIR) -> None:
@@ -176,10 +180,11 @@ def train_model(
     force: bool = False,
     models_dir: Path = MODELS_DIR,
     seq_len: int = SEQUENCE_LENGTH,
+    max_age_days: int = MODEL_MAX_AGE_DAYS,
 ) -> tuple[StockLSTM, StandardScaler]:
     input_size = features.shape[1]
 
-    if not force and _is_fresh(ticker, models_dir):
+    if not force and _is_fresh(ticker, models_dir, max_age_days):
         model, scaler = _load_model(ticker, input_size, models_dir)
         if model is not None and scaler is not None:
             log.info("Loaded cached model for %s", ticker)
@@ -187,26 +192,19 @@ def train_model(
 
     log.info("Training model for %s (%d samples, %d features)", ticker, len(features), input_size)
 
-    X = np.asarray(features)
+    X = np.asarray(features, dtype=np.float64)
 
     if not np.isfinite(X).all():
-        log.warning("Features Are Infinte Fixing it...")
-        
+        log.warning("%s: non-finite feature values detected, clamping to percentile range", ticker)
         finite_vals = X[np.isfinite(X)]
         vmin = np.nanpercentile(finite_vals, 1)
         vmax = np.nanpercentile(finite_vals, 99)
         inf_mask = ~np.isfinite(X)
         X[inf_mask] = np.sign(X[inf_mask]) * vmax
         X = np.clip(X, vmin, vmax)
-     
-        scaler = StandardScaler()
-        scaled = scaler.fit_transform(X)
-        log.warning("Fixed !")
 
-    else:
-        scaler = StandardScaler()
-        scaled = scaler.fit_transform(features)
-
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(X)
 
     X, y = _build_sequences(scaled, targets, seq_len)
     if len(X) < BATCH_SIZE * 2:

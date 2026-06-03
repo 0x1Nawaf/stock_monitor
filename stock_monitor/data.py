@@ -24,6 +24,10 @@ _HEADERS = {
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 4
 
+# Cached chart metadata from the most recent fetch_stock_data call per ticker.
+# fetch_live_price reads from here to avoid a duplicate HTTP request.
+_meta_cache: dict[str, dict] = {}
+
 
 def _parse_yahoo_response(data: dict) -> pd.DataFrame:
     result = data["chart"]["result"][0]
@@ -58,7 +62,10 @@ def fetch_stock_data(ticker: str, period: str = HISTORY_PERIOD) -> Optional[pd.D
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
-            df = _parse_yahoo_response(resp.json())
+            data = resp.json()
+            chart_result = data["chart"]["result"][0]
+            _meta_cache[ticker.upper()] = chart_result.get("meta", {})
+            df = _parse_yahoo_response(data)
             if len(df) < MIN_DATA_POINTS:
                 log.warning("%s: only %d rows (need %d)", ticker, len(df), MIN_DATA_POINTS)
                 return None
@@ -81,59 +88,90 @@ class LivePrice:
     timestamp: str
 
 
-def fetch_live_price(ticker: str) -> Optional[LivePrice]:
-    """Fetch the latest intraday price via Yahoo 1-minute bars.
+def _live_price_from_meta(meta: dict) -> Optional[LivePrice]:
+    """Extract a live price from Yahoo chart response metadata.
 
-    Returns the most recent minute bar's close as the live price.
-    Falls back to None if intraday data is unavailable.
+    The ``regularMarketPrice`` field in ``meta`` reflects the most recent
+    known price regardless of the chart range or interval requested, so
+    it works both during and outside market hours.
     """
+    price = meta.get("regularMarketPrice")
+    if price is None:
+        return None
+
+    prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+    if prev_close and prev_close > 0:
+        change_pct = round((price - prev_close) / prev_close * 100, 2)
+    else:
+        change_pct = 0.0
+
+    market_time = meta.get("regularMarketTime")
+    if market_time:
+        ts_str = pd.Timestamp(market_time, unit="s").strftime("%Y-%m-%d %H:%M")
+    else:
+        ts_str = ""
+
+    return LivePrice(price=round(float(price), 2), change_pct=change_pct, timestamp=ts_str)
+
+
+def fetch_live_price(ticker: str) -> Optional[LivePrice]:
+    """Fetch the latest market price for *ticker*.
+
+    Resolution order:
+      1. Cached metadata from a prior ``fetch_stock_data`` call (free — no
+         extra HTTP request).
+      2. Lightweight ``range=1d&interval=1d`` chart request, reading
+         ``meta.regularMarketPrice`` (works reliably even when Yahoo
+         blocks intraday 1-minute bar access).
+      3. Last bar from the chart response as a final fallback.
+    """
+    cached_meta = _meta_cache.pop(ticker.upper(), None)
+    if cached_meta:
+        result = _live_price_from_meta(cached_meta)
+        if result is not None:
+            return result
+
     url = f"{_YAHOO_BASE}/{ticker}"
-    params = {"range": "1d", "interval": "1m", "includePrePost": "false"}
+    params = {"range": "1d", "interval": "1d", "includePrePost": "false"}
 
     for attempt in range(_MAX_RETRIES):
         try:
             resp = _requests.get(url, headers=_HEADERS, params=params, timeout=15)
             if resp.status_code == 429:
                 wait = _BACKOFF_BASE * (attempt + 1)
-                log.warning("%s live: rate limited (429), retrying in %ds", ticker, wait)
+                log.warning("%s live: rate limited, retrying in %ds", ticker, wait)
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
             data = resp.json()
-            result = data["chart"]["result"][0]
-            meta = result.get("meta", {})
-            timestamps = result.get("timestamp")
-            quote = result["indicators"]["quote"][0]
+            chart_result = data["chart"]["result"][0]
+            meta = chart_result.get("meta", {})
 
-            if not timestamps or not quote.get("close"):
-                log.warning("%s: no intraday bars available", ticker)
-                return None
+            live = _live_price_from_meta(meta)
+            if live is not None:
+                return live
 
-            closes = quote["close"]
-            last_price = None
-            last_ts = None
-            for i in range(len(closes) - 1, -1, -1):
-                if closes[i] is not None:
-                    last_price = closes[i]
-                    last_ts = timestamps[i]
-                    break
+            timestamps = chart_result.get("timestamp")
+            quote = chart_result["indicators"]["quote"][0]
+            if timestamps and quote.get("close"):
+                closes = quote["close"]
+                for i in range(len(closes) - 1, -1, -1):
+                    if closes[i] is not None:
+                        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+                        change_pct = (
+                            round((closes[i] - prev_close) / prev_close * 100, 2)
+                            if prev_close and prev_close > 0
+                            else 0.0
+                        )
+                        ts_str = pd.Timestamp(timestamps[i], unit="s").strftime("%Y-%m-%d %H:%M")
+                        return LivePrice(
+                            price=round(float(closes[i]), 2),
+                            change_pct=change_pct,
+                            timestamp=ts_str,
+                        )
 
-            if last_price is None:
-                return None
-
-            prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
-            if prev_close and prev_close > 0:
-                change_pct = round((last_price - prev_close) / prev_close * 100, 2)
-            else:
-                change_pct = 0.0
-
-            ts_str = pd.Timestamp(last_ts, unit="s").strftime("%Y-%m-%d %H:%M")
-
-            return LivePrice(
-                price=round(last_price, 2),
-                change_pct=change_pct,
-                timestamp=ts_str,
-            )
+            log.warning("%s: no price data in response", ticker)
+            return None
         except Exception as exc:
             if attempt < _MAX_RETRIES - 1:
                 wait = _BACKOFF_BASE * (attempt + 1)

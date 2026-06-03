@@ -616,10 +616,14 @@ _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
 def _fetch_quote(ticker: str) -> tuple[float, float]:
     """Fetch current price and daily change % for a ticker.
 
+    Uses ``interval=1d`` with ``meta.regularMarketPrice`` which is more
+    reliable than 1-minute bars (Yahoo may block intraday access without
+    session cookies).
+
     Returns (price, change_pct). Falls back to (0.0, 0.0) on failure.
     """
     url = f"{_YAHOO_CHART}/{ticker}"
-    params = {"range": "1d", "interval": "1m", "includePrePost": "false"}
+    params = {"range": "1d", "interval": "1d", "includePrePost": "false"}
     try:
         resp = _requests.get(url, headers=_HEADERS, params=params, timeout=10)
         resp.raise_for_status()

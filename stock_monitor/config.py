@@ -66,6 +66,7 @@ class TimeframeConfig:
     sequence_length: int
     label: str
     live_price: bool
+    model_max_age_days: int = MODEL_MAX_AGE_DAYS
 
 
 TIMEFRAME_5D = TimeframeConfig(
@@ -75,6 +76,7 @@ TIMEFRAME_5D = TimeframeConfig(
     sequence_length=SEQUENCE_LENGTH,
     label="5 trading days",
     live_price=False,
+    model_max_age_days=MODEL_MAX_AGE_DAYS,
 )
 
 TIMEFRAME_1D = TimeframeConfig(
@@ -84,4 +86,5 @@ TIMEFRAME_1D = TimeframeConfig(
     sequence_length=SEQUENCE_LENGTH,
     label="1 trading day",
     live_price=True,
+    model_max_age_days=3,
 )

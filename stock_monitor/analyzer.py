@@ -156,6 +156,7 @@ def analyze(
             force=force_retrain,
             models_dir=timeframe.models_dir,
             seq_len=timeframe.sequence_length,
+            max_age_days=timeframe.model_max_age_days,
         )
 
         prediction = predict(
