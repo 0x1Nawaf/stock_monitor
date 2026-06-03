@@ -181,10 +181,10 @@ def run_daemon(
     log.info("Daemon stopped after %d cycles", cycle)
 
 
-def run_news(output_json: bool) -> None:
+def run_news(output_json: bool, tickers: list[str] | None = None) -> None:
     from stock_monitor.news import scan_news, format_news_text, format_news_json
 
-    movers = scan_news()
+    movers = scan_news(watchlist=tickers)
 
     sendNewsMessage(movers)
 
@@ -200,7 +200,8 @@ def main() -> None:
     setup_logging(args.verbose)
 
     if args.news:
-        run_news(output_json=args.json)
+        tickers = args.tickers or load_watchlist(WATCHLIST_PATH) or None
+        run_news(output_json=args.json, tickers=tickers)
         return
 
     tickers = args.tickers or load_watchlist(WATCHLIST_PATH) or DEFAULT_TICKERS

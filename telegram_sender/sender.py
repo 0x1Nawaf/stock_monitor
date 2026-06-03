@@ -38,8 +38,11 @@ def sendNewsMessage(movers):
     else:
         lines = ["📰 **News Scanner -- Top Movers**\n"]
         for m in movers[:10]:
+            price_str = f"${m.current_price:.2f}" if m.current_price else "N/A"
+            change_str = f"{m.change_pct:+.2f}%" if m.current_price else ""
             lines.append(
-                f"🔥 **{m.ticker}**  Predicted: +{m.predicted_gain_pct:.0f}%  "
+                f"🔥 **{m.ticker}**  {price_str}  {change_str}\n"
+                f"    Predicted: +{m.predicted_gain_pct:.0f}%  "
                 f"({m.headline_count} article{'s' if m.headline_count != 1 else ''})"
             )
             if m.top_headlines:

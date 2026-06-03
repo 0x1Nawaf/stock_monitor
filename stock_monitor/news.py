@@ -46,6 +46,8 @@ class NewsMover:
     predicted_gain_pct: float
     news_score: float
     headline_count: int
+    current_price: float = 0.0
+    change_pct: float = 0.0
     top_headlines: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -54,6 +56,8 @@ class NewsMover:
             "predicted_gain_pct": self.predicted_gain_pct,
             "news_score": self.news_score,
             "headline_count": self.headline_count,
+            "current_price": self.current_price,
+            "change_pct": self.change_pct,
             "top_headlines": self.top_headlines,
         }
 
@@ -603,6 +607,37 @@ def fetch_finviz_ticker_news(ticker: str) -> list[NewsItem]:
 
 
 # ---------------------------------------------------------------------------
+# Live price quote (lightweight, for news movers)
+# ---------------------------------------------------------------------------
+
+_YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
+
+
+def _fetch_quote(ticker: str) -> tuple[float, float]:
+    """Fetch current price and daily change % for a ticker.
+
+    Returns (price, change_pct). Falls back to (0.0, 0.0) on failure.
+    """
+    url = f"{_YAHOO_CHART}/{ticker}"
+    params = {"range": "1d", "interval": "1m", "includePrePost": "false"}
+    try:
+        resp = _requests.get(url, headers=_HEADERS, params=params, timeout=10)
+        resp.raise_for_status()
+        result = resp.json()["chart"]["result"][0]
+        meta = result.get("meta", {})
+        price = meta.get("regularMarketPrice", 0.0)
+        prev = meta.get("chartPreviousClose") or meta.get("previousClose") or 0.0
+        if price and prev and prev > 0:
+            change = round((price - prev) / prev * 100, 2)
+        else:
+            change = 0.0
+        return round(float(price), 2), change
+    except Exception as exc:
+        log.debug("Quote fetch failed for %s: %s", ticker, exc)
+        return 0.0, 0.0
+
+
+# ---------------------------------------------------------------------------
 # Aggregation and main entry point
 # ---------------------------------------------------------------------------
 
@@ -637,18 +672,32 @@ def _build_movers(ticker_items: dict[str, list[NewsItem]]) -> list[NewsMover]:
         ))
 
     movers.sort(key=lambda m: m.news_score, reverse=True)
+
+    log.info("Fetching live prices for %d movers...", len(movers))
+    for m in movers:
+        price, change = _fetch_quote(m.ticker)
+        m.current_price = price
+        m.change_pct = change
+        time.sleep(0.15)
+
     return movers
 
 
-def scan_news() -> list[NewsMover]:
+def scan_news(watchlist: list[str] | None = None) -> list[NewsMover]:
     """Fetch news from all sources, score, aggregate, return movers >= 5%.
+
+    Args:
+        watchlist: Optional list of tickers to always include in the scan.
+                   Their per-ticker news is fetched regardless of pass 1 results.
 
     Two-pass approach:
       Pass 1: Fetch from RSS + Finviz general + Finviz screener, identify candidates.
-      Pass 2: For each candidate ticker, fetch its dedicated Finviz page for
-              additional headlines, then re-aggregate.
+      Pass 2: For each candidate ticker (+ watchlist), fetch its dedicated Finviz
+              page for additional headlines, then re-aggregate.
     """
     _ensure_ticker_data()
+
+    watchlist_set = {t.upper() for t in (watchlist or [])}
 
     # --- Pass 1: broad fetch ---
     log.info("Fetching news from Yahoo Finance...")
@@ -672,20 +721,21 @@ def scan_news() -> list[NewsMover]:
 
     pass1_ticker_items = _aggregate_movers(pass1_items)
 
-    # Candidate tickers: any ticker with aggregate score > 0
     candidate_tickers = {
         t for t, items in pass1_ticker_items.items()
         if sum(it.score for it in items) > 0
     }
+    candidate_tickers |= watchlist_set
+    if watchlist_set:
+        log.info("Watchlist tickers added to candidates: %s", ", ".join(sorted(watchlist_set)))
     log.info("Pass 1 candidate tickers: %d", len(candidate_tickers))
 
     # --- Pass 2: per-ticker deep fetch ---
     extra_items: list[NewsItem] = []
     fetched = 0
     for ticker in sorted(candidate_tickers):
-        if fetched >= 25:
-            log.info("Per-ticker fetch limit reached (25), stopping")
-            break
+        if fetched >= 25 and ticker not in watchlist_set:
+            continue
         log.debug("Fetching Finviz per-ticker news for %s", ticker)
         ticker_news = fetch_finviz_ticker_news(ticker)
         if ticker_news:
@@ -724,8 +774,11 @@ def format_news_text(movers: list[NewsMover]) -> str:
         lines.append("NEWS MOVERS (predicted gain >= 5%)")
         lines.append("")
         for m in movers:
+            price_str = f"${m.current_price:>9.2f}" if m.current_price else "     N/A "
+            change_str = f"{m.change_pct:>+7.2f}%" if m.current_price else "    N/A "
             lines.append(
-                f"  {m.ticker:<6}  Predicted: {m.predicted_gain_pct:>+6.1f}%  "
+                f"  {m.ticker:<6}  {price_str}  {change_str}  "
+                f"Predicted: {m.predicted_gain_pct:>+6.1f}%  "
                 f"Score: {m.news_score:>5.1f}  "
                 f"{m.headline_count} article{'s' if m.headline_count != 1 else ''}"
             )
