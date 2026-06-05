@@ -1,0 +1,7 @@
+# Saudi Market (Tadawul) Watchlist
+# Tickers use .SR suffix for Yahoo Finance
+2222.SR
+1010.SR
+1150.SR
+2010.SR
+4001.SR

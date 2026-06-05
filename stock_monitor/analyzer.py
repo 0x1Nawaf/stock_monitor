@@ -30,6 +30,8 @@ class StockAnalysis:
     sma_50: float
     rsi: float
     timeframe: str = "5d"
+    market: str = "US"
+    currency: str = "$"
     error: Optional[str] = None
     reasons: list[str] = field(default_factory=list)
 
@@ -49,12 +51,14 @@ class StockAnalysis:
             "sma_50": self.sma_50,
             "rsi": self.rsi,
             "timeframe": self.timeframe,
+            "market": self.market,
+            "currency": self.currency,
             "reasons": self.reasons,
             "error": self.error,
         }
 
     @classmethod
-    def failed(cls, ticker: str, message: str, timeframe: str = "5d") -> StockAnalysis:
+    def failed(cls, ticker: str, message: str, timeframe: str = "5d", market: str = "US", currency: str = "$") -> StockAnalysis:
         return cls(
             ticker=ticker,
             price=0.0,
@@ -70,6 +74,8 @@ class StockAnalysis:
             sma_50=0.0,
             rsi=0.0,
             timeframe=timeframe,
+            market=market,
+            currency=currency,
             error=message,
         )
 
@@ -136,13 +142,15 @@ def analyze(
     ticker: str,
     force_retrain: bool = False,
     timeframe: TimeframeConfig = TIMEFRAME_5D,
+    market: str = "US",
+    currency: str = "$",
 ) -> StockAnalysis:
     tf_key = "1d" if timeframe.horizon == 1 else f"{timeframe.horizon}d"
 
     try:
         df = fetch_stock_data(ticker)
         if df is None:
-            return StockAnalysis.failed(ticker, "Insufficient historical data", tf_key)
+            return StockAnalysis.failed(ticker, "Insufficient historical data", tf_key, market, currency)
 
         features_df, targets = prepare_dataset(df, horizon=timeframe.horizon)
         valid_mask = targets.notna()
@@ -219,8 +227,10 @@ def analyze(
             sma_50=sma50,
             rsi=rsi,
             timeframe=tf_key,
+            market=market,
+            currency=currency,
             reasons=reasons,
         )
     except Exception as exc:
         log.exception("Failed to analyze %s", ticker)
-        return StockAnalysis.failed(ticker, str(exc), tf_key)
+        return StockAnalysis.failed(ticker, str(exc), tf_key, market, currency)

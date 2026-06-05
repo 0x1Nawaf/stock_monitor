@@ -42,6 +42,7 @@ def detect_changes(
                 "to": result.signal.value,
                 "score_delta": result.score - prev.get("score", 0),
                 "price": result.price,
+                "currency": result.currency,
             })
     return changes
 
@@ -81,8 +82,10 @@ def format_text(
     changes: list[dict[str, Any]] | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    markets = {r.market for r in results if not r.error}
+    market_label = " | ".join(sorted(markets)) if markets else "US"
     lines: list[str] = [
-        "STOCK MONITOR -- AI Engine",
+        f"STOCK MONITOR -- AI Engine [{market_label}]",
         now,
         "",
     ]
@@ -95,8 +98,9 @@ def format_text(
         lines.append("SIGNAL CHANGES")
         for c in changes:
             arrow = "^" if c["score_delta"] > 0 else "v"
+            cur = c.get("currency", "$")
             lines.append(
-                f"  {arrow} {c['ticker']}  ${c['price']}  "
+                f"  {arrow} {c['ticker']}  {cur}{c['price']}  "
                 f"{c['from']} -> {c['to']}  (score {c['score_delta']:+d})"
             )
         lines.append("")
@@ -119,7 +123,7 @@ def format_text(
         lines.append(label)
         for r in group:
             lines.append(
-                f"  {r.ticker:<6}  ${r.price:>10.2f}  {r.change_pct:>+7.2f}%  "
+                f"  {r.ticker:<10}  {r.currency}{r.price:>10.2f}  {r.change_pct:>+7.2f}%  "
                 f"Score: {r.score:>+4d}  "
                 f"Predicted: {r.predicted_return_pct:>+6.2f}%  "
                 f"Confidence: {r.confidence * 100:.0f}%"
@@ -133,14 +137,14 @@ def format_text(
     for r in valid:
         lines.append("")
         lines.append(
-            f"{r.signal.value}  {r.ticker}  ${r.price}  ({r.change_pct:+.2f}%)  "
+            f"{r.signal.value}  {r.ticker}  {r.currency}{r.price}  ({r.change_pct:+.2f}%)  "
             f"Score: {r.score:+d}"
         )
         lines.append(
-            f"  SMA(20): ${r.sma_20}  SMA(50): ${r.sma_50}  RSI(14): {r.rsi}"
+            f"  SMA(20): {r.currency}{r.sma_20}  SMA(50): {r.currency}{r.sma_50}  RSI(14): {r.rsi}"
         )
         lines.append(
-            f"  Support: ${r.support}  Resistance: ${r.resistance}"
+            f"  Support: {r.currency}{r.support}  Resistance: {r.currency}{r.resistance}"
         )
         horizon_label = "1 day" if r.timeframe == "1d" else f"{r.timeframe.rstrip('d')} days"
         lines.append(

@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from stock_monitor.config import WATCHLIST_PATH, TIMEFRAME_5D, TIMEFRAME_1D, TimeframeConfig
+from stock_monitor.config import WATCHLIST_PATH, WATCHLIST_SA_PATH, TIMEFRAME_5D, TIMEFRAME_1D, TimeframeConfig
 from stock_monitor.analyzer import analyze
 from stock_monitor.report import (
     format_text,
@@ -24,6 +24,24 @@ DEFAULT_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
     "META", "TSLA", "NFLX", "AMD", "INTC",
     "AVGO", "COST", "PEP", "ADBE", "CRM",
+]
+
+DEFAULT_SA_TICKERS = [
+    "2222.SR",  # Saudi Aramco
+    "1010.SR",  # Al Rajhi Bank
+    "1150.SR",  # Saudi National Bank (SNB)
+    "2010.SR",  # SABIC
+    "4001.SR",  # STC (Saudi Telecom)
+    "1180.SR",  # Al Tawuniya
+    "1211.SR",  # Ma'aden
+    "2380.SR",  # Petro Rabigh
+    "2020.SR",  # SABIC Agri-Nutrients
+    "4190.SR",  # Jarir Marketing
+    "2350.SR",  # Saudi Kayan
+    "2050.SR",  # Savola Group
+    "2060.SR",  # Tasnee
+    "4347.SR",  # Elm Company
+    "1120.SR",  # Al Rajhi REIT
 ]
 
 log = logging.getLogger("monitor")
@@ -69,6 +87,10 @@ def parse_args() -> argparse.Namespace:
         help="1-day predictions with live intraday prices",
     )
     parser.add_argument(
+        "--sa", action="store_true",
+        help="Analyze Saudi market (Tadawul) stocks instead of US",
+    )
+    parser.add_argument(
         "--news", action="store_true",
         help="Scan news for stocks likely to gain 5%+",
     )
@@ -107,13 +129,15 @@ def run_cycle(
     output_json: bool,
     print_report: bool,
     timeframe: TimeframeConfig = TIMEFRAME_5D,
+    market: str = "US",
+    currency: str = "$",
 ) -> None:
     previous = load_previous_report()
     results = []
 
     for i, ticker in enumerate(tickers, 1):
         log.info("[%d/%d] %s", i, len(tickers), ticker)
-        res = analyze(ticker, force_retrain=force_retrain, timeframe=timeframe)
+        res = analyze(ticker, force_retrain=force_retrain, timeframe=timeframe, market=market, currency=currency)
 
         sendMessage(res)
 
@@ -139,13 +163,15 @@ def run_daemon(
     train_interval: int,
     report_interval: int,
     timeframe: TimeframeConfig = TIMEFRAME_5D,
+    market: str = "US",
+    currency: str = "$",
 ) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
     log.info(
-        "Daemon started: %d tickers, train every %ds, report every %ds, timeframe=%s",
-        len(tickers), train_interval, report_interval, timeframe.label,
+        "Daemon started: %d tickers (%s market), train every %ds, report every %ds, timeframe=%s",
+        len(tickers), market, train_interval, report_interval, timeframe.label,
     )
 
     last_report_time = 0.0
@@ -165,6 +191,8 @@ def run_daemon(
             output_json=output_json,
             print_report=should_report,
             timeframe=timeframe,
+            market=market,
+            currency=currency,
         )
 
         if should_report:
@@ -199,12 +227,21 @@ def main() -> None:
     args = parse_args()
     setup_logging(args.verbose)
 
+    if args.sa:
+        market, currency = "SA", "SAR"
+        watchlist_path = WATCHLIST_SA_PATH
+        default_tickers = DEFAULT_SA_TICKERS
+    else:
+        market, currency = "US", "$"
+        watchlist_path = WATCHLIST_PATH
+        default_tickers = DEFAULT_TICKERS
+
     if args.news:
-        tickers = args.tickers or load_watchlist(WATCHLIST_PATH) or None
+        tickers = args.tickers or load_watchlist(watchlist_path) or None
         run_news(output_json=args.json, tickers=tickers)
         return
 
-    tickers = args.tickers or load_watchlist(WATCHLIST_PATH) or DEFAULT_TICKERS
+    tickers = args.tickers or load_watchlist(watchlist_path) or default_tickers
     timeframe = TIMEFRAME_1D if args.daily else TIMEFRAME_5D
 
     if args.daemon:
@@ -214,15 +251,19 @@ def main() -> None:
             train_interval=args.train_interval,
             report_interval=args.report_interval,
             timeframe=timeframe,
+            market=market,
+            currency=currency,
         )
     else:
-        log.info("Analyzing %d tickers (%s)...", len(tickers), timeframe.label)
+        log.info("Analyzing %d tickers (%s, %s market)...", len(tickers), timeframe.label, market)
         run_cycle(
             tickers=tickers,
             force_retrain=args.retrain,
             output_json=args.json,
             print_report=True,
             timeframe=timeframe,
+            market=market,
+            currency=currency,
         )
 
 

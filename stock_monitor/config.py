@@ -20,6 +20,7 @@ REPORTS_DIR = BASE_DIR / "reports"
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DAILY_DIR = BASE_DIR / "models_daily"
 WATCHLIST_PATH = BASE_DIR / "watchlist.txt"
+WATCHLIST_SA_PATH = BASE_DIR / "watchlist_sa.txt"
 
 HISTORY_PERIOD = "5y"
 MIN_DATA_POINTS = 200

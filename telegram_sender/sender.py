@@ -7,10 +7,13 @@ def sendMessage(res):
     chat_id = config.env_config["telegram_chat_id"]
 
     tf_label = "1-day" if getattr(res, "timeframe", "5d") == "1d" else "5-day"
+    currency = getattr(res, "currency", "$")
+    market = getattr(res, "market", "US")
+    market_flag = "🇸🇦" if market == "SA" else "🇺🇸"
     message = (
-        "📈 **Stock Update**\n\n"
+        f"📈 **Stock Update** {market_flag}\n\n"
         f"✨ **Ticker:** {res.ticker}\n"
-        f"💰 **Current Price:** ${res.price}\n"
+        f"💰 **Current Price:** {currency}{res.price}\n"
         f"🔔 **Signal:** {res.signal.value}\n"
         f"🚀 **Change:** {res.change_pct}%\n"
         f"💪 **Confidence:** {res.confidence * 100:.0f}%\n"
