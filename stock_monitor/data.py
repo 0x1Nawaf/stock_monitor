@@ -278,7 +278,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     f["vol_10d"] = close.pct_change().rolling(window=10).std()
     f["vol_20d"] = close.pct_change().rolling(window=20).std()
 
-    return f.dropna()
+    f = f.replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def build_targets(df: pd.DataFrame, horizon: int = PREDICTION_HORIZON) -> pd.Series:

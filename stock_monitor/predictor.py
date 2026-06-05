@@ -197,10 +197,16 @@ def train_model(
     if not np.isfinite(X).all():
         log.warning("%s: non-finite feature values detected, clamping to percentile range", ticker)
         finite_vals = X[np.isfinite(X)]
+        if len(finite_vals) == 0:
+            raise ValueError(f"No finite feature values for {ticker}")
         vmin = np.nanpercentile(finite_vals, 1)
         vmax = np.nanpercentile(finite_vals, 99)
-        inf_mask = ~np.isfinite(X)
-        X[inf_mask] = np.sign(X[inf_mask]) * vmax
+        pos_inf = np.isposinf(X)
+        neg_inf = np.isneginf(X)
+        nan_mask = np.isnan(X)
+        X[pos_inf] = vmax
+        X[neg_inf] = vmin
+        X[nan_mask] = 0.0
         X = np.clip(X, vmin, vmax)
 
     scaler = StandardScaler()
@@ -269,7 +275,10 @@ def predict(
         if len(w) >= seq_len:
             windows.append(w[-seq_len:])
 
-    scaled_batch = np.stack([scaler.transform(w) for w in windows]).astype(np.float32)
+    stacked = np.stack(windows)
+    if not np.isfinite(stacked).all():
+        stacked = np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0)
+    scaled_batch = np.stack([scaler.transform(w) for w in stacked]).astype(np.float32)
     x = torch.from_numpy(scaled_batch)
 
     with torch.no_grad():
