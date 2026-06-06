@@ -66,6 +66,10 @@ def fetch_stock_data(ticker: str, period: str = HISTORY_PERIOD) -> Optional[pd.D
             chart_result = data["chart"]["result"][0]
             _meta_cache[ticker.upper()] = chart_result.get("meta", {})
             df = _parse_yahoo_response(data)
+            pre_filter = len(df)
+            df = df[df["Volume"] > 0]
+            if pre_filter != len(df):
+                log.info("%s: dropped %d zero-volume rows (non-trading days)", ticker, pre_filter - len(df))
             if len(df) < MIN_DATA_POINTS:
                 log.warning("%s: only %d rows (need %d)", ticker, len(df), MIN_DATA_POINTS)
                 return None
