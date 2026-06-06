@@ -35,12 +35,21 @@ def _parse_yahoo_response(data: dict) -> pd.DataFrame:
     quote = result["indicators"]["quote"][0]
     adj = result["indicators"].get("adjclose", [{}])[0]
 
+    raw_close = np.array(quote["close"], dtype="float64")
+    adj_close = np.array(adj.get("adjclose", quote["close"]), dtype="float64")
+
+    # Adjust Open/High/Low by the same ratio so OHLC relationships hold
+    # after dividend/split adjustments (avoids Close < Low anomalies).
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where((raw_close > 0) & np.isfinite(raw_close), adj_close / raw_close, 1.0)
+    ratio = np.nan_to_num(ratio, nan=1.0)
+
     df = pd.DataFrame(
         {
-            "Open": quote["open"],
-            "High": quote["high"],
-            "Low": quote["low"],
-            "Close": adj.get("adjclose", quote["close"]),
+            "Open": np.array(quote["open"], dtype="float64") * ratio,
+            "High": np.array(quote["high"], dtype="float64") * ratio,
+            "Low": np.array(quote["low"], dtype="float64") * ratio,
+            "Close": adj_close,
             "Volume": quote["volume"],
         },
         index=pd.to_datetime(timestamps, unit="s"),
