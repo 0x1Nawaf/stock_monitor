@@ -1,10 +1,12 @@
 __pycache__/
 *.pyc
+.pytest_cache/
 
 models/
 models_daily/
 reports/
 
 *.log
+*.tmp
 .conf
 watchlist.txt

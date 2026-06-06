@@ -83,14 +83,24 @@ def _build_sequences(
     targets: np.ndarray,
     seq_len: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    xs, ys = [], []
-    for i in range(len(features) - seq_len):
-        idx = i + seq_len - 1
-        if idx >= len(targets) or np.isnan(targets[idx]):
-            continue
-        xs.append(features[i : i + seq_len])
-        ys.append(targets[idx])
-    return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
+    n = len(features) - seq_len
+    if n <= 0:
+        return np.empty((0, seq_len, features.shape[1]), dtype=np.float32), np.empty(0, dtype=np.float32)
+
+    from numpy.lib.stride_tricks import sliding_window_view
+    raw_windows = sliding_window_view(features, window_shape=seq_len, axis=0)
+    windows = np.swapaxes(raw_windows[:n], 1, 2)
+    target_indices = np.arange(seq_len - 1, seq_len - 1 + n)
+    valid = target_indices < len(targets)
+    valid[valid] &= ~np.isnan(targets[target_indices[valid]])
+
+    xs = windows[valid].astype(np.float32)
+    ys = targets[target_indices[valid]].astype(np.float32)
+    return xs, ys
+
+
+def _get_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _load_model(
@@ -104,6 +114,7 @@ def _load_model(
     scaler = _load_scaler(ticker, models_dir)
     if scaler is None:
         return None, None
+    device = _get_device()
     model = StockLSTM(
         input_size=input_size,
         hidden_size=HIDDEN_SIZE,
@@ -111,9 +122,9 @@ def _load_model(
         dropout=DROPOUT,
     )
     model.load_state_dict(
-        torch.load(path, map_location="cpu", weights_only=True)
+        torch.load(path, map_location=device, weights_only=True)
     )
-    model.eval()
+    model.to(device).eval()
     return model, scaler
 
 
@@ -209,21 +220,28 @@ def train_model(
         X[nan_mask] = 0.0
         X = np.clip(X, vmin, vmax)
 
+    split_idx = int(len(X) * 0.8)
+    X_train_raw, X_val_raw = X[:split_idx], X[split_idx:]
+    y_train_raw, y_val_raw = targets[:split_idx], targets[split_idx:]
+
     scaler = StandardScaler()
-    scaled = scaler.fit_transform(X)
+    X_train_scaled = scaler.fit_transform(X_train_raw)
+    X_val_scaled = scaler.transform(X_val_raw)
 
-    X, y = _build_sequences(scaled, targets, seq_len)
-    if len(X) < BATCH_SIZE * 2:
-        raise ValueError(f"Insufficient sequences for {ticker}: got {len(X)}")
+    X_train_seq, y_train_seq = _build_sequences(X_train_scaled, y_train_raw, seq_len)
+    X_val_seq, y_val_seq = _build_sequences(X_val_scaled, y_val_raw, seq_len)
 
-    split = int(len(X) * 0.8)
-    train_ds = TensorDataset(torch.from_numpy(X[:split]), torch.from_numpy(y[:split]))
-    val_ds = TensorDataset(torch.from_numpy(X[split:]), torch.from_numpy(y[split:]))
+    total_sequences = len(X_train_seq) + len(X_val_seq)
+    if total_sequences < BATCH_SIZE * 2:
+        raise ValueError(f"Insufficient sequences for {ticker}: got {total_sequences}")
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+    train_ds = TensorDataset(torch.from_numpy(X_train_seq), torch.from_numpy(y_train_seq))
+    val_ds = TensorDataset(torch.from_numpy(X_val_seq), torch.from_numpy(y_val_seq))
+
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _get_device()
     model = StockLSTM(
         input_size=input_size,
         hidden_size=HIDDEN_SIZE,
@@ -266,7 +284,8 @@ def predict(
     models_dir: Path = MODELS_DIR,
     seq_len: int = SEQUENCE_LENGTH,
 ) -> PredictionResult:
-    model.eval()
+    device = _get_device()
+    model.to(device).eval()
 
     lookback = min(10, len(features) - seq_len)
     windows: list[np.ndarray] = [features[-seq_len:]]
@@ -279,7 +298,7 @@ def predict(
     if not np.isfinite(stacked).all():
         stacked = np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0)
     scaled_batch = np.stack([scaler.transform(w) for w in stacked]).astype(np.float32)
-    x = torch.from_numpy(scaled_batch)
+    x = torch.from_numpy(scaled_batch).to(device)
 
     with torch.no_grad():
         preds = model(x).cpu().numpy().tolist()

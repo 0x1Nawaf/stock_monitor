@@ -108,7 +108,7 @@ def _classify(
     score = int(max(-100, min(100, adjusted * 2000)))
 
     reasons.append(
-        f"We predicts {ret * 100:+.2f}% over {horizon_label}"
+        f"Model predicts {ret * 100:+.2f}% over {horizon_label}"
     )
     reasons.append(f"Model confidence: {conf * 100:.0f}%")
 
