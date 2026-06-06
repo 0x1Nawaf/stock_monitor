@@ -117,19 +117,11 @@ def _live_price_from_meta(meta: dict) -> Optional[LivePrice]:
 def fetch_live_price(ticker: str) -> Optional[LivePrice]:
     """Fetch the latest market price for *ticker*.
 
-    Resolution order:
-      1. Cached metadata from a prior ``fetch_stock_data`` call (free — no
-         extra HTTP request).
-      2. Lightweight ``range=1d&interval=1d`` chart request, reading
-         ``meta.regularMarketPrice`` (works reliably even when Yahoo
-         blocks intraday 1-minute bar access).
-      3. Last bar from the chart response as a final fallback.
+    Always uses a lightweight ``range=1d&interval=1d`` chart request so
+    that ``chartPreviousClose`` reflects yesterday's close (not the start
+    of a multi-year chart range cached by ``fetch_stock_data``).
     """
-    cached_meta = _meta_cache.pop(ticker.upper(), None)
-    if cached_meta:
-        result = _live_price_from_meta(cached_meta)
-        if result is not None:
-            return result
+    _meta_cache.pop(ticker.upper(), None)
 
     url = f"{_YAHOO_BASE}/{ticker}"
     params = {"range": "1d", "interval": "1d", "includePrePost": "false"}
