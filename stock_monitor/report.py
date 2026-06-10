@@ -183,7 +183,7 @@ def format_text(
             lines.append(f"  {r.ticker}: {r.error}")
 
     lines.append("")
-    tf = "1 trading day" if any(r.timeframe == "1d" for r in valid) else "5 trading days"
+    tf = r.timeframe+" trading days"
     lines.append("-" * 72)
     lines.append(f"Engine: Neural Network | Prediction horizon: {tf}")
     lines.append("Not financial advice. Do your own research.")
