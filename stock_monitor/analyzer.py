@@ -107,6 +107,13 @@ def _classify(
 
     score = int(max(-100, min(100, adjusted * 2000)))
 
+    if signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY):
+        reasons.append(f"Buy signal over {horizon_label}")
+    elif signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL):
+        reasons.append(f"Sell signal over {horizon_label}")
+    else:
+        reasons.append(f"No clear direction over {horizon_label}")
+
     reasons.append(
         f"Model predicts {ret * 100:+.2f}% over {horizon_label}"
     )
