@@ -202,6 +202,11 @@ def analyze(
             else:
                 reasons.append("Live price unavailable, using last daily close")
 
+        if signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY):
+            reasons.insert(0, f"Buy at {currency}{price}")
+        elif signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL):
+            reasons.insert(0, f"Sell at {currency}{price}")
+
         support, resistance = _support_resistance(df)
         sma20, sma50, rsi = _current_indicators(df, features_df)
 
