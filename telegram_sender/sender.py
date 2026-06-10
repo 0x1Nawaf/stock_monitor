@@ -66,12 +66,20 @@ def sendMessage(res: StockAnalysis) -> bool:
 
     signal_icon = _SIGNAL_ICONS.get(res.signal.value, "⚪")
     market_flag = "🇸🇦" if res.market == "SA" else "🇺🇸"
-    tf_label = "1 day" if res.timeframe == "1d" else "5 days"
+    tf_labels = {"1d": "1 day", "5d": "5 days", "swing": "swing (10 days)", "monthly": "1 month (21 days)"}
+    tf_label = tf_labels.get(res.timeframe, res.timeframe)
     direction = "+" if res.predicted_return_pct >= 0 else ""
+
+    action = ""
+    if res.signal.value in ("STRONG BUY", "BUY", "LEAN BUY"):
+        action = f"🟢 <b>Buy at {res.currency}{res.price:.2f}</b>\n"
+    elif res.signal.value in ("STRONG SELL", "SELL", "LEAN SELL"):
+        action = f"🔴 <b>Sell at {res.currency}{res.price:.2f}</b>\n"
 
     text = (
         f"{signal_icon} <b>{res.ticker}</b> — {res.signal.value}\n"
         f"\n"
+        f"{action}"
         f"Price:      {res.currency}{res.price:.2f} ({res.change_pct:+.2f}%)\n"
         f"Predicted:  {direction}{res.predicted_return_pct:.2f}% over {tf_label}\n"
         f"Confidence: {res.confidence * 100:.0f}%\n"
