@@ -10,7 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from stock_monitor.config import WATCHLIST_PATH, WATCHLIST_SA_PATH, TIMEFRAME_5D, TIMEFRAME_1D, TimeframeConfig
+from stock_monitor.config import (
+    WATCHLIST_PATH, WATCHLIST_SA_PATH,
+    TIMEFRAME_5D, TIMEFRAME_1D, TIMEFRAME_MONTHLY, TIMEFRAME_SWING,
+    TimeframeConfig,
+)
 from stock_monitor.analyzer import analyze
 from stock_monitor.report import (
     format_text,
@@ -86,6 +90,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--daily", action="store_true",
         help="1-day predictions with live intraday prices",
+    )
+    parser.add_argument(
+        "--monthly", action="store_true",
+        help="21-day (1 month) predictions for longer-term outlook",
+    )
+    parser.add_argument(
+        "--swing", action="store_true",
+        help="10-day swing trading predictions with live prices",
     )
     parser.add_argument(
         "--sa", action="store_true",
@@ -264,7 +276,18 @@ def main() -> None:
         return
 
     tickers = args.tickers or load_watchlist(watchlist_path) or default_tickers
-    timeframe = TIMEFRAME_1D if args.daily else TIMEFRAME_5D
+
+    if sum([args.daily, args.monthly, args.swing]) > 1:
+        sys.exit("Error: --daily, --monthly, and --swing are mutually exclusive")
+
+    if args.daily:
+        timeframe = TIMEFRAME_1D
+    elif args.monthly:
+        timeframe = TIMEFRAME_MONTHLY
+    elif args.swing:
+        timeframe = TIMEFRAME_SWING
+    else:
+        timeframe = TIMEFRAME_5D
 
     if args.daemon:
         run_daemon(

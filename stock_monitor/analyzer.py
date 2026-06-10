@@ -145,7 +145,8 @@ def analyze(
     market: str = "US",
     currency: str = "$",
 ) -> StockAnalysis:
-    tf_key = "1d" if timeframe.horizon == 1 else f"{timeframe.horizon}d"
+    tf_key_map = {1: "1d", 5: "5d", 10: "swing", 21: "monthly"}
+    tf_key = tf_key_map.get(timeframe.horizon, f"{timeframe.horizon}d")
 
     try:
         df = fetch_stock_data(ticker)

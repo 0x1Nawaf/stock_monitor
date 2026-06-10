@@ -4,6 +4,8 @@ __pycache__/
 
 models/
 models_daily/
+models_monthly/
+models_swing/
 reports/
 
 *.log

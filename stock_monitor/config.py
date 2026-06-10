@@ -19,6 +19,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 REPORTS_DIR = BASE_DIR / "reports"
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DAILY_DIR = BASE_DIR / "models_daily"
+MODELS_MONTHLY_DIR = BASE_DIR / "models_monthly"
+MODELS_SWING_DIR = BASE_DIR / "models_swing"
 WATCHLIST_PATH = BASE_DIR / "watchlist.txt"
 WATCHLIST_SA_PATH = BASE_DIR / "watchlist_sa.txt"
 
@@ -56,6 +58,26 @@ DAILY_SIGNAL_THRESHOLDS: dict[Signal, float] = {
     Signal.STRONG_SELL: -0.015,
 }
 
+MONTHLY_SIGNAL_THRESHOLDS: dict[Signal, float] = {
+    Signal.STRONG_BUY: 0.08,
+    Signal.BUY: 0.04,
+    Signal.LEAN_BUY: 0.012,
+    Signal.HOLD: 0.0,
+    Signal.LEAN_SELL: -0.012,
+    Signal.SELL: -0.04,
+    Signal.STRONG_SELL: -0.08,
+}
+
+SWING_SIGNAL_THRESHOLDS: dict[Signal, float] = {
+    Signal.STRONG_BUY: 0.05,
+    Signal.BUY: 0.025,
+    Signal.LEAN_BUY: 0.007,
+    Signal.HOLD: 0.0,
+    Signal.LEAN_SELL: -0.007,
+    Signal.SELL: -0.025,
+    Signal.STRONG_SELL: -0.05,
+}
+
 MAX_REPORT_FILES = 50
 
 
@@ -88,4 +110,24 @@ TIMEFRAME_1D = TimeframeConfig(
     label="1 trading day",
     live_price=True,
     model_max_age_days=3,
+)
+
+TIMEFRAME_MONTHLY = TimeframeConfig(
+    horizon=21,
+    models_dir=MODELS_MONTHLY_DIR,
+    signal_thresholds=MONTHLY_SIGNAL_THRESHOLDS,
+    sequence_length=SEQUENCE_LENGTH,
+    label="1 trading month (21 days)",
+    live_price=False,
+    model_max_age_days=14,
+)
+
+TIMEFRAME_SWING = TimeframeConfig(
+    horizon=10,
+    models_dir=MODELS_SWING_DIR,
+    signal_thresholds=SWING_SIGNAL_THRESHOLDS,
+    sequence_length=SEQUENCE_LENGTH,
+    label="swing (10 trading days)",
+    live_price=True,
+    model_max_age_days=5,
 )
