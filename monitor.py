@@ -23,7 +23,7 @@ from stock_monitor.report import (
     load_previous_report,
     detect_changes,
 )
-from telegram_sender.sender import sendMessage, sendNewsMessage
+from telegram_sender.sender import sendMessage, sendNewsMessage, clear_previous
 
 DEFAULT_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
@@ -158,6 +158,7 @@ def run_cycle(
     currency: str = "$",
     max_workers: int = 4,
 ) -> None:
+    clear_previous()
     previous = load_previous_report()
     results = []
 

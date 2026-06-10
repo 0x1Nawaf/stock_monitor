@@ -1,7 +1,9 @@
 """Telegram Bot API notification sender for stock monitor alerts."""
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,6 +22,8 @@ _SIGNAL_ICONS = {
     "STRONG SELL": "🔴🔴",
 }
 
+_MSG_IDS_FILE = Path(__file__).resolve().parent.parent / ".telegram_msg_ids"
+
 
 def _get_credentials() -> tuple[str, str] | None:
     try:
@@ -31,6 +35,64 @@ def _get_credentials() -> tuple[str, str] | None:
     except Exception:
         pass
     return None
+
+
+def _save_message_id(msg_id: int) -> None:
+    ids = _load_message_ids()
+    ids.append(msg_id)
+    _MSG_IDS_FILE.write_text(json.dumps(ids))
+
+
+def _load_message_ids() -> list[int]:
+    if not _MSG_IDS_FILE.exists():
+        return []
+    try:
+        return json.loads(_MSG_IDS_FILE.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+
+def _clear_message_ids() -> None:
+    if _MSG_IDS_FILE.exists():
+        _MSG_IDS_FILE.unlink()
+
+
+def clear_previous() -> None:
+    """Delete all recent bot messages from the chat by sweeping backwards."""
+    creds = _get_credentials()
+    if creds is None:
+        return
+    token, chat_id = creds
+
+    import requests
+
+    resp = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": "🔄"},
+        timeout=10,
+    )
+    if not resp.ok:
+        return
+
+    latest_id = resp.json().get("result", {}).get("message_id", 0)
+    if not latest_id:
+        return
+
+    msg_ids = list(range(latest_id, max(latest_id - 200, 0), -1))
+
+    for batch_start in range(0, len(msg_ids), 100):
+        batch = msg_ids[batch_start:batch_start + 100]
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/deleteMessages",
+                json={"chat_id": chat_id, "message_ids": batch},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    _clear_message_ids()
+    log.info("Cleared Telegram chat (swept %d message IDs)", len(msg_ids))
 
 
 def _send(token: str, chat_id: str, text: str) -> bool:
@@ -48,7 +110,11 @@ def _send(token: str, chat_id: str, text: str) -> bool:
         )
         if not resp.ok:
             log.warning("Telegram send failed: %s", resp.text)
-        return resp.ok
+            return False
+        msg_id = resp.json().get("result", {}).get("message_id")
+        if msg_id:
+            _save_message_id(msg_id)
+        return True
     except Exception as exc:
         log.warning("Telegram send error: %s", exc)
         return False
