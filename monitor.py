@@ -6,6 +6,7 @@ import logging
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -123,6 +124,18 @@ def setup_logging(verbose: bool) -> None:
     )
 
 
+def _analyze_ticker(
+    ticker: str,
+    force_retrain: bool,
+    timeframe: TimeframeConfig,
+    market: str,
+    currency: str,
+):
+    res = analyze(ticker, force_retrain=force_retrain, timeframe=timeframe, market=market, currency=currency)
+    sendMessage(res)
+    return res
+
+
 def run_cycle(
     tickers: list[str],
     force_retrain: bool,
@@ -131,20 +144,29 @@ def run_cycle(
     timeframe: TimeframeConfig = TIMEFRAME_5D,
     market: str = "US",
     currency: str = "$",
+    max_workers: int = 4,
 ) -> None:
     previous = load_previous_report()
     results = []
 
-    for i, ticker in enumerate(tickers, 1):
-        log.info("[%d/%d] %s", i, len(tickers), ticker)
-        res = analyze(ticker, force_retrain=force_retrain, timeframe=timeframe, market=market, currency=currency)
+    log.info("Analyzing %d tickers with %d workers...", len(tickers), max_workers)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ticker = {
+            executor.submit(
+                _analyze_ticker, ticker, force_retrain, timeframe, market, currency
+            ): ticker
+            for ticker in tickers
+        }
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                res = future.result()
+                results.append(res)
+                log.info("Completed %s (%d/%d)", ticker, len(results), len(tickers))
+            except Exception as exc:
+                log.error("Failed %s: %s", ticker, exc)
 
-        sendMessage(res)
-
-        results.append(res)
-
-        if i < len(tickers):
-            time.sleep(2)
+    results.sort(key=lambda r: tickers.index(r.ticker))
 
     changes = detect_changes(results, previous)
     save_report(results)

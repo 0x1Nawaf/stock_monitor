@@ -1,32 +1,16 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import requests as _requests
 
 from .config import HISTORY_PERIOD, MIN_DATA_POINTS, PREDICTION_HORIZON
+from .yahoo_client import fetch_chart
 
 log = logging.getLogger(__name__)
-
-_YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
-_MAX_RETRIES = 3
-_BACKOFF_BASE = 4
-
-# Cached chart metadata from the most recent fetch_stock_data call per ticker.
-# fetch_live_price reads from here to avoid a duplicate HTTP request.
-_meta_cache: dict[str, dict] = {}
 
 
 def _parse_yahoo_response(data: dict) -> pd.DataFrame:
@@ -59,39 +43,23 @@ def _parse_yahoo_response(data: dict) -> pd.DataFrame:
 
 
 def fetch_stock_data(ticker: str, period: str = HISTORY_PERIOD) -> Optional[pd.DataFrame]:
-    url = f"{_YAHOO_BASE}/{ticker}"
-    params = {"range": period, "interval": "1d", "includePrePost": "false"}
+    data = fetch_chart(ticker, range_=period, interval="1d")
+    if data is None:
+        return None
 
-    for attempt in range(_MAX_RETRIES):
-        try:
-            resp = _requests.get(url, headers=_HEADERS, params=params, timeout=15)
-            if resp.status_code == 429:
-                wait = _BACKOFF_BASE * (attempt + 1)
-                log.warning("%s: rate limited (429), retrying in %ds", ticker, wait)
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            chart_result = data["chart"]["result"][0]
-            _meta_cache[ticker.upper()] = chart_result.get("meta", {})
-            df = _parse_yahoo_response(data)
-            pre_filter = len(df)
-            df = df[df["Volume"] > 0]
-            if pre_filter != len(df):
-                log.info("%s: dropped %d zero-volume rows (non-trading days)", ticker, pre_filter - len(df))
-            if len(df) < MIN_DATA_POINTS:
-                log.warning("%s: only %d rows (need %d)", ticker, len(df), MIN_DATA_POINTS)
-                return None
-            return df
-        except Exception as exc:
-            if attempt < _MAX_RETRIES - 1:
-                wait = _BACKOFF_BASE * (attempt + 1)
-                log.warning("%s: %s, retrying in %ds", ticker, exc, wait)
-                time.sleep(wait)
-            else:
-                log.error("%s: failed after %d attempts: %s", ticker, _MAX_RETRIES, exc)
-                return None
-    return None
+    try:
+        df = _parse_yahoo_response(data)
+        pre_filter = len(df)
+        df = df[df["Volume"] > 0]
+        if pre_filter != len(df):
+            log.info("%s: dropped %d zero-volume rows (non-trading days)", ticker, pre_filter - len(df))
+        if len(df) < MIN_DATA_POINTS:
+            log.warning("%s: only %d rows (need %d)", ticker, len(df), MIN_DATA_POINTS)
+            return None
+        return df
+    except (KeyError, IndexError, ValueError) as exc:
+        log.error("%s: failed to parse response: %s", ticker, exc)
+        return None
 
 
 @dataclass
@@ -134,58 +102,42 @@ def fetch_live_price(ticker: str) -> Optional[LivePrice]:
     that ``chartPreviousClose`` reflects yesterday's close (not the start
     of a multi-year chart range cached by ``fetch_stock_data``).
     """
-    _meta_cache.pop(ticker.upper(), None)
+    data = fetch_chart(ticker, range_="1d", interval="1d")
+    if data is None:
+        return None
 
-    url = f"{_YAHOO_BASE}/{ticker}"
-    params = {"range": "1d", "interval": "1d", "includePrePost": "false"}
+    try:
+        chart_result = data["chart"]["result"][0]
+        meta = chart_result.get("meta", {})
 
-    for attempt in range(_MAX_RETRIES):
-        try:
-            resp = _requests.get(url, headers=_HEADERS, params=params, timeout=15)
-            if resp.status_code == 429:
-                wait = _BACKOFF_BASE * (attempt + 1)
-                log.warning("%s live: rate limited, retrying in %ds", ticker, wait)
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            chart_result = data["chart"]["result"][0]
-            meta = chart_result.get("meta", {})
+        live = _live_price_from_meta(meta)
+        if live is not None:
+            return live
 
-            live = _live_price_from_meta(meta)
-            if live is not None:
-                return live
+        timestamps = chart_result.get("timestamp")
+        quote = chart_result["indicators"]["quote"][0]
+        if timestamps and quote.get("close"):
+            closes = quote["close"]
+            for i in range(len(closes) - 1, -1, -1):
+                if closes[i] is not None:
+                    prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+                    change_pct = (
+                        round((closes[i] - prev_close) / prev_close * 100, 2)
+                        if prev_close and prev_close > 0
+                        else 0.0
+                    )
+                    ts_str = pd.Timestamp(timestamps[i], unit="s").strftime("%Y-%m-%d %H:%M")
+                    return LivePrice(
+                        price=round(float(closes[i]), 2),
+                        change_pct=change_pct,
+                        timestamp=ts_str,
+                    )
 
-            timestamps = chart_result.get("timestamp")
-            quote = chart_result["indicators"]["quote"][0]
-            if timestamps and quote.get("close"):
-                closes = quote["close"]
-                for i in range(len(closes) - 1, -1, -1):
-                    if closes[i] is not None:
-                        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
-                        change_pct = (
-                            round((closes[i] - prev_close) / prev_close * 100, 2)
-                            if prev_close and prev_close > 0
-                            else 0.0
-                        )
-                        ts_str = pd.Timestamp(timestamps[i], unit="s").strftime("%Y-%m-%d %H:%M")
-                        return LivePrice(
-                            price=round(float(closes[i]), 2),
-                            change_pct=change_pct,
-                            timestamp=ts_str,
-                        )
-
-            log.warning("%s: no price data in response", ticker)
-            return None
-        except Exception as exc:
-            if attempt < _MAX_RETRIES - 1:
-                wait = _BACKOFF_BASE * (attempt + 1)
-                log.warning("%s live: %s, retrying in %ds", ticker, exc, wait)
-                time.sleep(wait)
-            else:
-                log.error("%s live: failed after %d attempts: %s", ticker, _MAX_RETRIES, exc)
-                return None
-    return None
+        log.warning("%s: no price data in response", ticker)
+        return None
+    except (KeyError, IndexError, TypeError) as exc:
+        log.error("%s live: failed to parse response: %s", ticker, exc)
+        return None
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:

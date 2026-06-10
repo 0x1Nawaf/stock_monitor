@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from typing import Any
 
@@ -47,6 +49,25 @@ def detect_changes(
     return changes
 
 
+def _atomic_write(path, content: str) -> None:
+    """Write content to path atomically via temp file + rename."""
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    closed = False
+    try:
+        os.write(fd, content.encode())
+        os.close(fd)
+        closed = True
+        os.replace(tmp_path, path)
+    except BaseException:
+        if not closed:
+            os.close(fd)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def save_report(results: list[StockAnalysis]) -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
@@ -56,11 +77,12 @@ def save_report(results: list[StockAnalysis]) -> None:
             r.ticker: r.to_dict() for r in results if not r.error
         },
     }
+    content = json.dumps(data, indent=2, default=str)
     ts_file = REPORTS_DIR / f"report-{now.strftime('%Y%m%d-%H%M')}.json"
     latest_file = REPORTS_DIR / "latest.json"
 
-    for path in (ts_file, latest_file):
-        path.write_text(json.dumps(data, indent=2, default=str))
+    ts_file.write_text(content)
+    _atomic_write(latest_file, content)
 
     reports = sorted(REPORTS_DIR.glob("report-*.json"))
     for stale in reports[:-MAX_REPORT_FILES]:

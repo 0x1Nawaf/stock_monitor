@@ -10,19 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import requests as _requests
-
 from .config import MODELS_DIR
+from .yahoo_client import get_session, fetch_quote
 
 log = logging.getLogger(__name__)
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
 _TIMEOUT = 15
 _TICKER_CACHE_PATH = MODELS_DIR / "ticker_list.json"
 _TICKER_CACHE_MAX_AGE = 7 * 86400
@@ -161,7 +153,7 @@ def _load_ticker_list() -> dict[str, str]:
             f"?tableonly=true&limit=10000&exchange={exchange}"
         )
         try:
-            resp = _requests.get(url, headers=_HEADERS, timeout=20)
+            resp = get_session().get(url, timeout=20)
             resp.raise_for_status()
             payload = resp.json()
             rows = payload.get("data", {}).get("table", {}).get("rows", [])
@@ -383,7 +375,7 @@ def _deduplicate(items: list[NewsItem]) -> list[NewsItem]:
 def _fetch_rss(url: str, source_name: str) -> list[NewsItem]:
     items: list[NewsItem] = []
     try:
-        resp = _requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        resp = get_session().get(url, timeout=_TIMEOUT)
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
 
@@ -459,7 +451,7 @@ def fetch_finviz_news() -> list[NewsItem]:
     items: list[NewsItem] = []
     url = "https://finviz.com/news.ashx"
     try:
-        resp = _requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        resp = get_session().get(url, timeout=_TIMEOUT)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -508,7 +500,7 @@ def fetch_finviz_screener() -> list[NewsItem]:
     for signal_id, source_label in signals:
         url = f"https://finviz.com/screener.ashx?v=340&s={signal_id}"
         try:
-            resp = _requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+            resp = get_session().get(url, timeout=_TIMEOUT)
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -569,7 +561,7 @@ def fetch_finviz_ticker_news(ticker: str) -> list[NewsItem]:
     items: list[NewsItem] = []
     url = f"https://finviz.com/quote.ashx?t={ticker.upper()}"
     try:
-        resp = _requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
+        resp = get_session().get(url, timeout=_TIMEOUT)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -610,35 +602,7 @@ def fetch_finviz_ticker_news(ticker: str) -> list[NewsItem]:
 # Live price quote (lightweight, for news movers)
 # ---------------------------------------------------------------------------
 
-_YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart"
-
-
-def _fetch_quote(ticker: str) -> tuple[float, float]:
-    """Fetch current price and daily change % for a ticker.
-
-    Uses ``interval=1d`` with ``meta.regularMarketPrice`` which is more
-    reliable than 1-minute bars (Yahoo may block intraday access without
-    session cookies).
-
-    Returns (price, change_pct). Falls back to (0.0, 0.0) on failure.
-    """
-    url = f"{_YAHOO_CHART}/{ticker}"
-    params = {"range": "1d", "interval": "1d", "includePrePost": "false"}
-    try:
-        resp = _requests.get(url, headers=_HEADERS, params=params, timeout=10)
-        resp.raise_for_status()
-        result = resp.json()["chart"]["result"][0]
-        meta = result.get("meta", {})
-        price = meta.get("regularMarketPrice", 0.0)
-        prev = meta.get("chartPreviousClose") or meta.get("previousClose") or 0.0
-        if price and prev and prev > 0:
-            change = round((price - prev) / prev * 100, 2)
-        else:
-            change = 0.0
-        return round(float(price), 2), change
-    except Exception as exc:
-        log.debug("Quote fetch failed for %s: %s", ticker, exc)
-        return 0.0, 0.0
+_fetch_quote = fetch_quote
 
 
 # ---------------------------------------------------------------------------
