@@ -90,6 +90,7 @@ class TimeframeConfig:
     label: str
     live_price: bool
     model_max_age_days: int = MODEL_MAX_AGE_DAYS
+    atr_stop_multiplier: float = 2.0
 
 
 TIMEFRAME_5D = TimeframeConfig(
@@ -100,6 +101,7 @@ TIMEFRAME_5D = TimeframeConfig(
     label="5 trading days",
     live_price=False,
     model_max_age_days=MODEL_MAX_AGE_DAYS,
+    atr_stop_multiplier=2.0,
 )
 
 TIMEFRAME_1D = TimeframeConfig(
@@ -110,6 +112,7 @@ TIMEFRAME_1D = TimeframeConfig(
     label="1 trading day",
     live_price=True,
     model_max_age_days=3,
+    atr_stop_multiplier=1.5,
 )
 
 TIMEFRAME_MONTHLY = TimeframeConfig(
@@ -120,6 +123,7 @@ TIMEFRAME_MONTHLY = TimeframeConfig(
     label="1 trading month (21 days)",
     live_price=False,
     model_max_age_days=14,
+    atr_stop_multiplier=3.0,
 )
 
 TIMEFRAME_SWING = TimeframeConfig(
@@ -130,4 +134,5 @@ TIMEFRAME_SWING = TimeframeConfig(
     label="swing (10 trading days)",
     live_price=True,
     model_max_age_days=5,
+    atr_stop_multiplier=2.5,
 )

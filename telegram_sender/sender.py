@@ -73,8 +73,12 @@ def sendMessage(res: StockAnalysis) -> bool:
     action = ""
     if res.signal.value in ("STRONG BUY", "BUY", "LEAN BUY"):
         action = f"🟢 <b>Buy at {res.currency}{res.price:.2f}</b>\n"
+        if res.stop_loss > 0:
+            action += f"🛑 Stop loss: {res.currency}{res.stop_loss:.2f}\n"
     elif res.signal.value in ("STRONG SELL", "SELL", "LEAN SELL"):
         action = f"🔴 <b>Sell at {res.currency}{res.price:.2f}</b>\n"
+        if res.stop_loss > 0:
+            action += f"🛑 Stop loss: {res.currency}{res.stop_loss:.2f}\n"
 
     text = (
         f"{signal_icon} <b>{res.ticker}</b> — {res.signal.value}\n"

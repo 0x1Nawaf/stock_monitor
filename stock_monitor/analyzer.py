@@ -29,6 +29,7 @@ class StockAnalysis:
     sma_20: float
     sma_50: float
     rsi: float
+    stop_loss: float = 0.0
     timeframe: str = "5d"
     market: str = "US"
     currency: str = "$"
@@ -50,6 +51,7 @@ class StockAnalysis:
             "sma_20": self.sma_20,
             "sma_50": self.sma_50,
             "rsi": self.rsi,
+            "stop_loss": self.stop_loss,
             "timeframe": self.timeframe,
             "market": self.market,
             "currency": self.currency,
@@ -135,6 +137,35 @@ def _support_resistance(df: pd.DataFrame, lookback: int = 20) -> tuple[float, fl
     return round(float(recent["Low"].min()), 2), round(float(recent["High"].max()), 2)
 
 
+def _compute_atr(df: pd.DataFrame, period: int = 14) -> float:
+    high = df["High"]
+    low = df["Low"]
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr_series = tr.rolling(window=period).mean()
+    return float(atr_series.iloc[-1])
+
+
+def _stop_loss(
+    price: float,
+    signal: Signal,
+    support: float,
+    resistance: float,
+    atr: float,
+    multiplier: float,
+) -> float:
+    if signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY):
+        atr_stop = price - (atr * multiplier)
+        return round(max(atr_stop, support * 0.99), 2)
+    elif signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL):
+        atr_stop = price + (atr * multiplier)
+        return round(min(atr_stop, resistance * 1.01), 2)
+    return 0.0
+
+
 def _current_indicators(
     df: pd.DataFrame, features_df: pd.DataFrame
 ) -> tuple[float, float, float]:
@@ -210,6 +241,19 @@ def analyze(
         support, resistance = _support_resistance(df)
         sma20, sma50, rsi = _current_indicators(df, features_df)
 
+        atr = _compute_atr(df)
+        stop_loss = _stop_loss(
+            price, signal, support, resistance,
+            atr, timeframe.atr_stop_multiplier,
+        )
+
+        if stop_loss > 0:
+            sl_pct = abs(stop_loss - price) / price * 100
+            if signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY):
+                reasons.insert(1, f"Stop loss at {currency}{stop_loss:.2f} ({sl_pct:.1f}% below entry)")
+            elif signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL):
+                reasons.insert(1, f"Stop loss at {currency}{stop_loss:.2f} ({sl_pct:.1f}% above entry)")
+
         if price > sma20:
             reasons.append(f"Price above SMA(20) at {sma20}")
         else:
@@ -239,6 +283,7 @@ def analyze(
             sma_20=sma20,
             sma_50=sma50,
             rsi=rsi,
+            stop_loss=stop_loss,
             timeframe=tf_key,
             market=market,
             currency=currency,
