@@ -32,21 +32,21 @@ DEFAULT_TICKERS = [
 ]
 
 DEFAULT_SA_TICKERS = [
-    "2222.SR",  # Saudi Aramco
-    "1010.SR",  # Al Rajhi Bank
-    "1150.SR",  # Saudi National Bank (SNB)
-    "2010.SR",  # SABIC
-    "4001.SR",  # STC (Saudi Telecom)
-    "1180.SR",  # Al Tawuniya
-    "1211.SR",  # Ma'aden
-    "2380.SR",  # Petro Rabigh
-    "2020.SR",  # SABIC Agri-Nutrients
-    "4190.SR",  # Jarir Marketing
-    "2350.SR",  # Saudi Kayan
-    "2050.SR",  # Savola Group
-    "2060.SR",  # Tasnee
-    "4347.SR",  # Elm Company
-    "1120.SR",  # Al Rajhi REIT
+    "2222.SR",
+    "1010.SR",
+    "1150.SR",
+    "2010.SR",
+    "4001.SR",
+    "1180.SR",
+    "1211.SR",
+    "2380.SR",
+    "2020.SR",
+    "4190.SR",
+    "2350.SR",
+    "2050.SR",
+    "2060.SR",
+    "4347.SR",
+    "1120.SR",
 ]
 
 log = logging.getLogger("monitor")
@@ -108,6 +108,18 @@ def parse_args() -> argparse.Namespace:
         help="Scan news for stocks likely to gain 5%+",
     )
     parser.add_argument(
+        "--cross", action="store_true",
+        help="Use cross-sectional model (single model trained on all tickers)",
+    )
+    parser.add_argument(
+        "--backtest", action="store_true",
+        help="Run walk-forward backtest and print accuracy report",
+    )
+    parser.add_argument(
+        "--no-lstm", action="store_true",
+        help="Use GBM only (skip LSTM for faster training)",
+    )
+    parser.add_argument(
         "--daemon", action="store_true",
         help="Run continuously: retrain every hour, report every 3 hours",
     )
@@ -142,8 +154,20 @@ def _analyze_ticker(
     timeframe: TimeframeConfig,
     market: str,
     currency: str,
+    market_df,
+    vix_df,
+    use_lstm: bool,
 ):
-    res = analyze(ticker, force_retrain=force_retrain, timeframe=timeframe, market=market, currency=currency)
+    res = analyze(
+        ticker,
+        force_retrain=force_retrain,
+        timeframe=timeframe,
+        market=market,
+        currency=currency,
+        market_df=market_df,
+        vix_df=vix_df,
+        use_lstm=use_lstm,
+    )
     sendMessage(res)
     return res
 
@@ -157,16 +181,26 @@ def run_cycle(
     market: str = "US",
     currency: str = "$",
     max_workers: int = 4,
+    use_lstm: bool = True,
 ) -> None:
     clear_previous()
     previous = load_previous_report()
     results = []
 
+    market_df = None
+    vix_df = None
+    try:
+        from stock_monitor.market_data import get_market_context
+        market_df, vix_df = get_market_context()
+    except Exception as exc:
+        log.warning("Failed to fetch market context: %s", exc)
+
     log.info("Analyzing %d tickers with %d workers...", len(tickers), max_workers)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ticker = {
             executor.submit(
-                _analyze_ticker, ticker, force_retrain, timeframe, market, currency
+                _analyze_ticker, ticker, force_retrain, timeframe,
+                market, currency, market_df, vix_df, use_lstm,
             ): ticker
             for ticker in tickers
         }
@@ -200,6 +234,7 @@ def run_daemon(
     timeframe: TimeframeConfig = TIMEFRAME_5D,
     market: str = "US",
     currency: str = "$",
+    use_lstm: bool = True,
 ) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -228,6 +263,7 @@ def run_daemon(
             timeframe=timeframe,
             market=market,
             currency=currency,
+            use_lstm=use_lstm,
         )
 
         if should_report:
@@ -255,6 +291,37 @@ def run_news(output_json: bool, tickers: list[str] | None = None) -> None:
         print(format_news_json(movers))
     else:
         print(format_news_text(movers))
+    sys.stdout.flush()
+
+
+def run_backtest(
+    tickers: list[str],
+    timeframe: TimeframeConfig = TIMEFRAME_5D,
+) -> None:
+    from stock_monitor.backtest import walk_forward_backtest, format_backtest_report
+    from stock_monitor.market_data import get_market_context
+
+    market_df, vix_df = get_market_context()
+
+    results = []
+    for ticker in tickers:
+        log.info("Backtesting %s...", ticker)
+        result = walk_forward_backtest(
+            ticker, timeframe=timeframe,
+            market_df=market_df, vix_df=vix_df,
+        )
+        if result is not None:
+            results.append(result)
+            log.info(
+                "  %s: dir_acc=%.1f%% cls_acc=%.1f%% PF=%.2f",
+                ticker, result.directional_accuracy * 100,
+                result.class_accuracy * 100, result.profit_factor,
+            )
+
+    if results:
+        print(format_backtest_report(results))
+    else:
+        print("No backtest results generated.")
     sys.stdout.flush()
 
 
@@ -290,6 +357,12 @@ def main() -> None:
     else:
         timeframe = TIMEFRAME_5D
 
+    use_lstm = not args.no_lstm
+
+    if args.backtest:
+        run_backtest(tickers, timeframe=timeframe)
+        return
+
     if args.daemon:
         run_daemon(
             tickers=tickers,
@@ -299,6 +372,7 @@ def main() -> None:
             timeframe=timeframe,
             market=market,
             currency=currency,
+            use_lstm=use_lstm,
         )
     else:
         log.info("Analyzing %d tickers (%s, %s market)...", len(tickers), timeframe.label, market)
@@ -310,6 +384,7 @@ def main() -> None:
             timeframe=timeframe,
             market=market,
             currency=currency,
+            use_lstm=use_lstm,
         )
 
 

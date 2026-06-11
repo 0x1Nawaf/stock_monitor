@@ -7,9 +7,18 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .config import Signal, SIGNAL_THRESHOLDS, PREDICTION_HORIZON, TIMEFRAME_5D, TimeframeConfig
-from .data import fetch_stock_data, fetch_live_price, prepare_dataset
-from .predictor import train_model, predict, PredictionResult
+from .config import Signal, TIMEFRAME_5D, TimeframeConfig
+from .data import fetch_stock_data, fetch_live_price
+from .features import build_all_features
+from .targets import (
+    build_classification_targets,
+    get_thresholds,
+    get_class_weights,
+    TargetClass,
+)
+from .models.gbm import train_gbm, predict_gbm, GBMPrediction
+from .models.lstm_clf import train_lstm_classifier, predict_lstm, LSTMPrediction
+from .models.ensemble import combine_predictions, prediction_to_signal, EnsemblePrediction
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +44,11 @@ class StockAnalysis:
     currency: str = "$"
     error: Optional[str] = None
     reasons: list[str] = field(default_factory=list)
+    prob_up: float = 0.0
+    prob_down: float = 0.0
+    prob_flat: float = 0.0
+    ensemble_agreement: float = 0.0
+    model_type: str = "ensemble"
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +71,11 @@ class StockAnalysis:
             "currency": self.currency,
             "reasons": self.reasons,
             "error": self.error,
+            "prob_up": self.prob_up,
+            "prob_down": self.prob_down,
+            "prob_flat": self.prob_flat,
+            "ensemble_agreement": self.ensemble_agreement,
+            "model_type": self.model_type,
         }
 
     @classmethod
@@ -80,56 +99,6 @@ class StockAnalysis:
             currency=currency,
             error=message,
         )
-
-
-def _classify(
-    prediction: PredictionResult,
-    thresholds: dict[Signal, float] = SIGNAL_THRESHOLDS,
-    horizon_label: str = "5 trading days",
-) -> tuple[Signal, int, list[str]]:
-    ret = prediction.predicted_return
-    conf = prediction.confidence
-    adjusted = ret * conf
-    reasons: list[str] = []
-
-    if adjusted >= thresholds[Signal.STRONG_BUY]:
-        signal = Signal.STRONG_BUY
-    elif adjusted >= thresholds[Signal.BUY]:
-        signal = Signal.BUY
-    elif adjusted >= thresholds[Signal.LEAN_BUY]:
-        signal = Signal.LEAN_BUY
-    elif adjusted <= thresholds[Signal.STRONG_SELL]:
-        signal = Signal.STRONG_SELL
-    elif adjusted <= thresholds[Signal.SELL]:
-        signal = Signal.SELL
-    elif adjusted <= thresholds[Signal.LEAN_SELL]:
-        signal = Signal.LEAN_SELL
-    else:
-        signal = Signal.HOLD
-
-    score = int(max(-100, min(100, adjusted * 2000)))
-
-    if signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY):
-        reasons.append(f"Buy signal over {horizon_label}")
-    elif signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL):
-        reasons.append(f"Sell signal over {horizon_label}")
-    else:
-        reasons.append(f"No clear direction over {horizon_label}")
-
-    reasons.append(
-        f"Model predicts {ret * 100:+.2f}% over {horizon_label}"
-    )
-    reasons.append(f"Model confidence: {conf * 100:.0f}%")
-
-    if conf >= 0.8:
-        reasons.append("High prediction consistency across recent windows")
-    elif conf <= 0.4:
-        reasons.append("Low prediction consistency -- treat with caution")
-
-    if prediction.model_age_days > 5:
-        reasons.append(f"Model trained {prediction.model_age_days:.0f} days ago -- consider retraining")
-
-    return signal, score, reasons
 
 
 def _support_resistance(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float]:
@@ -176,12 +145,25 @@ def _current_indicators(
     return sma20, sma50, rsi_val
 
 
+def _estimated_return_from_probs(probs: np.ndarray, horizon: int) -> float:
+    up_thresh, down_thresh = get_thresholds(horizon)
+    expected = (
+        probs[TargetClass.UP] * up_thresh * 1.5
+        + probs[TargetClass.FLAT] * 0.0
+        + probs[TargetClass.DOWN] * down_thresh * 1.5
+    )
+    return float(expected)
+
+
 def analyze(
     ticker: str,
     force_retrain: bool = False,
     timeframe: TimeframeConfig = TIMEFRAME_5D,
     market: str = "US",
     currency: str = "$",
+    market_df: Optional[pd.DataFrame] = None,
+    vix_df: Optional[pd.DataFrame] = None,
+    use_lstm: bool = True,
 ) -> StockAnalysis:
     tf_key_map = {1: "1d", 5: "5d", 10: "swing", 21: "monthly"}
     tf_key = tf_key_map.get(timeframe.horizon, f"{timeframe.horizon}d")
@@ -191,31 +173,55 @@ def analyze(
         if df is None:
             return StockAnalysis.failed(ticker, "Insufficient historical data", tf_key, market, currency)
 
-        features_df, targets = prepare_dataset(df, horizon=timeframe.horizon)
-        valid_mask = targets.notna()
-        train_features = features_df[valid_mask].values
-        train_targets = targets[valid_mask].values
+        features_df = build_all_features(df, market_df, vix_df)
+        if len(features_df) < 200:
+            return StockAnalysis.failed(ticker, "Insufficient features after engineering", tf_key, market, currency)
 
-        model, scaler = train_model(
+        horizon = timeframe.horizon
+        up_thresh, down_thresh = get_thresholds(horizon)
+        targets = build_classification_targets(df, horizon, up_thresh, down_thresh)
+        targets = targets.reindex(features_df.index)
+
+        features_arr = features_df.values
+        targets_arr = targets.values
+
+        class_weights = get_class_weights(targets_arr)
+
+        gbm_model = train_gbm(
             ticker,
-            train_features,
-            train_targets,
+            features_arr,
+            targets_arr,
             force=force_retrain,
             models_dir=timeframe.models_dir,
-            seq_len=timeframe.sequence_length,
             max_age_days=timeframe.model_max_age_days,
+            class_weights=class_weights,
         )
+        gbm_pred = predict_gbm(ticker, gbm_model, features_arr, models_dir=timeframe.models_dir)
 
-        prediction = predict(
-            ticker,
-            model,
-            scaler,
-            features_df.values,
-            models_dir=timeframe.models_dir,
-            seq_len=timeframe.sequence_length,
-        )
-        signal, score, reasons = _classify(
-            prediction,
+        lstm_pred = None
+        if use_lstm:
+            try:
+                lstm_model = train_lstm_classifier(
+                    ticker,
+                    features_arr,
+                    targets_arr,
+                    force=force_retrain,
+                    models_dir=timeframe.models_dir,
+                    seq_len=timeframe.sequence_length,
+                    max_age_days=timeframe.model_max_age_days,
+                    class_weights=class_weights,
+                )
+                lstm_pred = predict_lstm(
+                    ticker, lstm_model, features_arr,
+                    models_dir=timeframe.models_dir,
+                    seq_len=timeframe.sequence_length,
+                )
+            except Exception as exc:
+                log.warning("LSTM failed for %s, using GBM only: %s", ticker, exc)
+
+        ensemble = combine_predictions(gbm_pred, lstm_pred)
+        signal, score, reasons = prediction_to_signal(
+            ensemble,
             thresholds=timeframe.signal_thresholds,
             horizon_label=timeframe.label,
         )
@@ -269,15 +275,19 @@ def analyze(
         elif rsi < 30:
             reasons.append(f"RSI at {rsi} -- oversold territory")
 
+        predicted_return = _estimated_return_from_probs(ensemble.probabilities, horizon)
+
+        model_type = "ensemble" if lstm_pred is not None else "gbm"
+
         return StockAnalysis(
             ticker=ticker,
             price=price,
             change_pct=change_pct,
             signal=signal,
             score=score,
-            predicted_return_pct=round(prediction.predicted_return * 100, 2),
-            confidence=prediction.confidence,
-            model_age_days=prediction.model_age_days,
+            predicted_return_pct=round(predicted_return * 100, 2),
+            confidence=ensemble.confidence,
+            model_age_days=ensemble.model_age_days,
             support=support,
             resistance=resistance,
             sma_20=sma20,
@@ -288,6 +298,11 @@ def analyze(
             market=market,
             currency=currency,
             reasons=reasons,
+            prob_up=round(float(ensemble.probabilities[TargetClass.UP]), 3),
+            prob_down=round(float(ensemble.probabilities[TargetClass.DOWN]), 3),
+            prob_flat=round(float(ensemble.probabilities[TargetClass.FLAT]), 3),
+            ensemble_agreement=ensemble.ensemble_agreement,
+            model_type=model_type,
         )
     except Exception as exc:
         log.exception("Failed to analyze %s", ticker)

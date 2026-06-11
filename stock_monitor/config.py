@@ -80,6 +80,33 @@ SWING_SIGNAL_THRESHOLDS: dict[Signal, float] = {
 
 MAX_REPORT_FILES = 50
 
+GBM_WEIGHT = 0.6
+LSTM_WEIGHT = 0.4
+
+GBM_PARAMS = {
+    "objective": "multiclass",
+    "num_class": 3,
+    "metric": "multi_logloss",
+    "boosting_type": "gbdt",
+    "num_leaves": 31,
+    "learning_rate": 0.05,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "min_child_samples": 20,
+    "lambda_l1": 0.1,
+    "lambda_l2": 0.1,
+    "verbose": -1,
+    "seed": 42,
+}
+
+CLASSIFICATION_THRESHOLDS = {
+    1: (0.008, -0.008),
+    5: (0.02, -0.02),
+    10: (0.03, -0.03),
+    21: (0.05, -0.05),
+}
+
 
 @dataclass(frozen=True)
 class TimeframeConfig:

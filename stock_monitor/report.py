@@ -50,7 +50,6 @@ def detect_changes(
 
 
 def _atomic_write(path, content: str) -> None:
-    """Write content to path atomically via temp file + rename."""
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     closed = False
     try:
@@ -116,6 +115,9 @@ def format_text(
     errors = [r for r in results if r.error]
     valid.sort(key=lambda r: r.score, reverse=True)
 
+    model_types = {r.model_type for r in valid}
+    engine_label = "Ensemble (GBM + LSTM)" if "ensemble" in model_types else "GBM Classifier"
+
     if changes:
         lines.append("SIGNAL CHANGES")
         for c in changes:
@@ -147,8 +149,8 @@ def format_text(
             lines.append(
                 f"  {r.ticker:<10}  {r.currency}{r.price:>10.2f}  {r.change_pct:>+7.2f}%  "
                 f"Score: {r.score:>+4d}  "
-                f"Predicted: {r.predicted_return_pct:>+6.2f}%  "
-                f"Confidence: {r.confidence * 100:.0f}%"
+                f"P(UP)={r.prob_up:.0%} P(DN)={r.prob_down:.0%}  "
+                f"Conf: {r.confidence:.0%}"
             )
         lines.append("")
 
@@ -171,8 +173,13 @@ def format_text(
         horizon_label = "1 day" if r.timeframe == "1d" else f"{r.timeframe.rstrip('d')} days"
         lines.append(
             f"  Predicted {r.predicted_return_pct:+.2f}% over {horizon_label}  "
-            f"(confidence {r.confidence * 100:.0f}%)"
+            f"(confidence {r.confidence:.0%})"
         )
+        lines.append(
+            f"  Probabilities: UP={r.prob_up:.1%}  FLAT={r.prob_flat:.1%}  DOWN={r.prob_down:.1%}"
+        )
+        if r.ensemble_agreement > 0:
+            lines.append(f"  Ensemble agreement: {r.ensemble_agreement:.0%}")
         for reason in r.reasons:
             lines.append(f"    {reason}")
 
@@ -183,9 +190,8 @@ def format_text(
             lines.append(f"  {r.ticker}: {r.error}")
 
     lines.append("")
-    tf = r.timeframe+" trading days"
     lines.append("-" * 72)
-    lines.append(f"Engine: Neural Network | Prediction horizon: {tf}")
+    lines.append(f"Engine: {engine_label} | Classification-based prediction")
     lines.append("Not financial advice. Do your own research.")
 
     return "\n".join(lines)

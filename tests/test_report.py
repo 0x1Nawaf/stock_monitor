@@ -1,8 +1,8 @@
-"""Tests for report formatting and change detection."""
 from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 
 from stock_monitor.config import Signal
@@ -25,6 +25,11 @@ def _make_analysis(ticker="AAPL", signal=Signal.BUY, score=50, price=150.0) -> S
         sma_20=148.0,
         sma_50=146.0,
         rsi=55.0,
+        prob_up=0.65,
+        prob_down=0.10,
+        prob_flat=0.25,
+        ensemble_agreement=1.0,
+        model_type="ensemble",
     )
 
 
@@ -82,6 +87,16 @@ class TestFormatText:
         text = format_text(results)
         assert "STOCK MONITOR" in text
 
+    def test_contains_probabilities(self):
+        results = [_make_analysis()]
+        text = format_text(results)
+        assert "P(UP)" in text
+
+    def test_contains_ensemble_info(self):
+        results = [_make_analysis()]
+        text = format_text(results)
+        assert "Ensemble" in text
+
     def test_errors_section(self):
         results = [StockAnalysis.failed("BAD", "some error")]
         text = format_text(results)
@@ -104,3 +119,11 @@ class TestFormatJson:
         parsed = json.loads(output)
         assert parsed[0]["ticker"] == "TSLA"
         assert parsed[1]["ticker"] == "AAPL"
+
+    def test_contains_new_fields(self):
+        output = format_json([_make_analysis()])
+        parsed = json.loads(output)
+        assert "prob_up" in parsed[0]
+        assert "prob_down" in parsed[0]
+        assert "ensemble_agreement" in parsed[0]
+        assert "model_type" in parsed[0]
