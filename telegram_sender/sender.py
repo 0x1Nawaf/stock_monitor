@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-    if TYPE_CHECKING:
+if TYPE_CHECKING:
     from stock_monitor.analyzer import StockAnalysis
     from stock_monitor.gainers import Gainer, GainerAnalysis
     from stock_monitor.news import NewsMover
