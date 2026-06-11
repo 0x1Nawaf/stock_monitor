@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 DEFAULT_GBM_WEIGHT = 0.6
 DEFAULT_LSTM_WEIGHT = 0.4
 
+BASELINE_PROB = 1.0 / 3.0
+
 
 @dataclass
 class EnsemblePrediction:
@@ -27,6 +29,12 @@ class EnsemblePrediction:
     ensemble_agreement: float
 
 
+def _calibrate_confidence(probabilities: np.ndarray) -> float:
+    max_prob = float(np.max(probabilities))
+    edge_over_random = (max_prob - BASELINE_PROB) / (1.0 - BASELINE_PROB)
+    return round(max(0.0, min(1.0, edge_over_random * 1.5)), 3)
+
+
 def combine_predictions(
     gbm_pred: Optional[GBMPrediction],
     lstm_pred: Optional[LSTMPrediction],
@@ -37,7 +45,7 @@ def combine_predictions(
         return EnsemblePrediction(
             predicted_class=1,
             probabilities=np.array([0.33, 0.34, 0.33]),
-            confidence=0.34,
+            confidence=0.0,
             model_age_days=0.0,
             gbm_agrees=True,
             lstm_agrees=True,
@@ -45,10 +53,11 @@ def combine_predictions(
         )
 
     if gbm_pred is None:
+        conf = _calibrate_confidence(lstm_pred.probabilities)
         return EnsemblePrediction(
             predicted_class=lstm_pred.predicted_class,
             probabilities=lstm_pred.probabilities,
-            confidence=lstm_pred.confidence,
+            confidence=conf,
             model_age_days=lstm_pred.model_age_days,
             gbm_agrees=True,
             lstm_agrees=True,
@@ -56,10 +65,11 @@ def combine_predictions(
         )
 
     if lstm_pred is None:
+        conf = _calibrate_confidence(gbm_pred.probabilities)
         return EnsemblePrediction(
             predicted_class=gbm_pred.predicted_class,
             probabilities=gbm_pred.probabilities,
-            confidence=gbm_pred.confidence,
+            confidence=conf,
             model_age_days=gbm_pred.model_age_days,
             gbm_agrees=True,
             lstm_agrees=True,
@@ -72,7 +82,7 @@ def combine_predictions(
 
     combined_probs = w_gbm * gbm_pred.probabilities + w_lstm * lstm_pred.probabilities
     predicted_class = int(np.argmax(combined_probs))
-    confidence = float(combined_probs[predicted_class])
+    confidence = _calibrate_confidence(combined_probs)
 
     gbm_agrees = gbm_pred.predicted_class == predicted_class
     lstm_agrees = lstm_pred.predicted_class == predicted_class
@@ -80,9 +90,9 @@ def combine_predictions(
     if gbm_agrees and lstm_agrees:
         agreement = 1.0
     elif gbm_agrees or lstm_agrees:
-        agreement = 0.6
+        agreement = 0.7
     else:
-        agreement = 0.3
+        agreement = 0.4
 
     age = max(gbm_pred.model_age_days, lstm_pred.model_age_days)
 
@@ -106,33 +116,39 @@ def prediction_to_signal(
 
     prob_up = float(prediction.probabilities[TargetClass.UP])
     prob_down = float(prediction.probabilities[TargetClass.DOWN])
-    net_score = prob_up - prob_down
+    prob_flat = float(prediction.probabilities[TargetClass.FLAT])
 
-    adjusted = net_score * prediction.confidence * prediction.ensemble_agreement
-    score = int(max(-100, min(100, adjusted * 200)))
+    edge_up = prob_up - BASELINE_PROB
+    edge_down = prob_down - BASELINE_PROB
+    net_edge = edge_up - edge_down
+
+    conviction = net_edge * prediction.ensemble_agreement
+    score = int(max(-100, min(100, conviction * 300)))
 
     reasons = []
 
     if prediction.predicted_class == TargetClass.UP:
-        if prob_up >= 0.6:
-            if adjusted >= 0.4:
-                signal = Signal.STRONG_BUY
-            else:
-                signal = Signal.BUY
-        else:
+        if prob_up > prob_down + 0.20 and prediction.ensemble_agreement >= 0.9:
+            signal = Signal.STRONG_BUY
+        elif prob_up > prob_down + 0.10:
+            signal = Signal.BUY
+        elif prob_up > prob_down + 0.03:
             signal = Signal.LEAN_BUY
+        else:
+            signal = Signal.HOLD
     elif prediction.predicted_class == TargetClass.DOWN:
-        if prob_down >= 0.6:
-            if adjusted <= -0.4:
-                signal = Signal.STRONG_SELL
-            else:
-                signal = Signal.SELL
-        else:
+        if prob_down > prob_up + 0.20 and prediction.ensemble_agreement >= 0.9:
+            signal = Signal.STRONG_SELL
+        elif prob_down > prob_up + 0.10:
+            signal = Signal.SELL
+        elif prob_down > prob_up + 0.03:
             signal = Signal.LEAN_SELL
+        else:
+            signal = Signal.HOLD
     else:
-        if net_score > 0.1:
+        if edge_up > 0.08:
             signal = Signal.LEAN_BUY
-        elif net_score < -0.1:
+        elif edge_down > 0.08:
             signal = Signal.LEAN_SELL
         else:
             signal = Signal.HOLD
@@ -142,13 +158,13 @@ def prediction_to_signal(
         f"Ensemble predicts {class_names[prediction.predicted_class]} over {horizon_label}"
     )
     reasons.append(
-        f"Probabilities: UP={prob_up:.0%} FLAT={prediction.probabilities[1]:.0%} DOWN={prob_down:.0%}"
+        f"Probabilities: UP={prob_up:.0%} FLAT={prob_flat:.0%} DOWN={prob_down:.0%}"
     )
-    reasons.append(f"Ensemble confidence: {prediction.confidence:.0%}")
+    reasons.append(f"Confidence: {prediction.confidence:.0%}")
 
     if prediction.ensemble_agreement >= 0.9:
         reasons.append("Both models agree on direction")
-    elif prediction.ensemble_agreement <= 0.4:
+    elif prediction.ensemble_agreement <= 0.5:
         reasons.append("Models disagree -- signal less reliable")
 
     if prediction.model_age_days > 5:

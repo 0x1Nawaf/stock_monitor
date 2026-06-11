@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--news", action="store_true",
-        help="Scan news for stocks likely to gain 5%+",
+        help="Scan news for stocks likely to gain 5+",
     )
     parser.add_argument(
         "--cross", action="store_true",
