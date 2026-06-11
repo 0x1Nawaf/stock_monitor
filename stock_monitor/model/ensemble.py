@@ -29,10 +29,26 @@ class EnsemblePrediction:
     ensemble_agreement: float
 
 
-def _calibrate_confidence(probabilities: np.ndarray) -> float:
-    max_prob = float(np.max(probabilities))
-    edge_over_random = (max_prob - BASELINE_PROB) / (1.0 - BASELINE_PROB)
-    return round(max(0.0, min(1.0, edge_over_random * 1.5)), 3)
+def _calibrate_confidence(probabilities: np.ndarray, predicted_class: int = -1) -> float:
+    if predicted_class < 0:
+        predicted_class = int(np.argmax(probabilities))
+
+    prob_top = float(probabilities[predicted_class])
+
+    if predicted_class == 2:
+        prob_opposite = float(probabilities[0])
+    elif predicted_class == 0:
+        prob_opposite = float(probabilities[2])
+    else:
+        prob_opposite = float(max(probabilities[0], probabilities[2]))
+
+    if prob_top + prob_opposite < 1e-8:
+        return 0.0
+
+    directional = prob_top / (prob_top + prob_opposite)
+    edge = max(0.0, prob_top - BASELINE_PROB) / (1.0 - BASELINE_PROB)
+    confidence = 0.7 * directional + 0.3 * edge
+    return round(max(0.0, min(0.99, confidence)), 3)
 
 
 def combine_predictions(
@@ -53,7 +69,7 @@ def combine_predictions(
         )
 
     if gbm_pred is None:
-        conf = _calibrate_confidence(lstm_pred.probabilities)
+        conf = _calibrate_confidence(lstm_pred.probabilities, lstm_pred.predicted_class)
         return EnsemblePrediction(
             predicted_class=lstm_pred.predicted_class,
             probabilities=lstm_pred.probabilities,
@@ -65,7 +81,7 @@ def combine_predictions(
         )
 
     if lstm_pred is None:
-        conf = _calibrate_confidence(gbm_pred.probabilities)
+        conf = _calibrate_confidence(gbm_pred.probabilities, gbm_pred.predicted_class)
         return EnsemblePrediction(
             predicted_class=gbm_pred.predicted_class,
             probabilities=gbm_pred.probabilities,
@@ -82,7 +98,7 @@ def combine_predictions(
 
     combined_probs = w_gbm * gbm_pred.probabilities + w_lstm * lstm_pred.probabilities
     predicted_class = int(np.argmax(combined_probs))
-    confidence = _calibrate_confidence(combined_probs)
+    confidence = _calibrate_confidence(combined_probs, predicted_class)
 
     gbm_agrees = gbm_pred.predicted_class == predicted_class
     lstm_agrees = lstm_pred.predicted_class == predicted_class
