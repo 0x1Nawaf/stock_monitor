@@ -22,8 +22,6 @@ def _parse_yahoo_response(data: dict) -> pd.DataFrame:
     raw_close = np.array(quote["close"], dtype="float64")
     adj_close = np.array(adj.get("adjclose", quote["close"]), dtype="float64")
 
-    # Adjust Open/High/Low by the same ratio so OHLC relationships hold
-    # after dividend/split adjustments (avoids Close < Low anomalies).
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where((raw_close > 0) & np.isfinite(raw_close), adj_close / raw_close, 1.0)
     ratio = np.nan_to_num(ratio, nan=1.0)
@@ -70,12 +68,6 @@ class LivePrice:
 
 
 def _live_price_from_meta(meta: dict) -> Optional[LivePrice]:
-    """Extract a live price from Yahoo chart response metadata.
-
-    The ``regularMarketPrice`` field in ``meta`` reflects the most recent
-    known price regardless of the chart range or interval requested, so
-    it works both during and outside market hours.
-    """
     price = meta.get("regularMarketPrice")
     if price is None:
         return None
@@ -96,12 +88,6 @@ def _live_price_from_meta(meta: dict) -> Optional[LivePrice]:
 
 
 def fetch_live_price(ticker: str) -> Optional[LivePrice]:
-    """Fetch the latest market price for *ticker*.
-
-    Always uses a lightweight ``range=1d&interval=1d`` chart request so
-    that ``chartPreviousClose`` reflects yesterday's close (not the start
-    of a multi-year chart range cached by ``fetch_stock_data``).
-    """
     data = fetch_chart(ticker, range_="1d", interval="1d")
     if data is None:
         return None

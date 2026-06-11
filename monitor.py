@@ -23,7 +23,9 @@ from stock_monitor.report import (
     load_previous_report,
     detect_changes,
 )
-from telegram_sender.sender import sendMessage, sendNewsMessage, clear_previous
+from telegram_sender.sender import (
+    sendMessage, sendNewsMessage, sendGainersMessage, clear_previous,
+)
 
 DEFAULT_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
@@ -106,6 +108,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--news", action="store_true",
         help="Scan news for stocks likely to gain 5+",
+    )
+    parser.add_argument(
+        "--gainers", action="store_true",
+        help="Detect today's top gaining stocks with volume analysis",
     )
     parser.add_argument(
         "--backtest", action="store_true",
@@ -290,6 +296,20 @@ def run_news(output_json: bool, tickers: list[str] | None = None) -> None:
     sys.stdout.flush()
 
 
+def run_gainers(output_json: bool) -> None:
+    from stock_monitor.gainers import scan_gainers, format_gainers_text, format_gainers_json
+
+    gainers = scan_gainers()
+
+    sendGainersMessage(gainers)
+
+    if output_json:
+        print(format_gainers_json(gainers))
+    else:
+        print(format_gainers_text(gainers))
+    sys.stdout.flush()
+
+
 def run_backtest(
     tickers: list[str],
     timeframe: TimeframeConfig = TIMEFRAME_5D,
@@ -336,6 +356,10 @@ def main() -> None:
         market, currency = "US", "$"
         watchlist_path = WATCHLIST_PATH
         default_tickers = DEFAULT_TICKERS
+
+    if args.gainers:
+        run_gainers(output_json=args.json)
+        return
 
     if args.news:
         tickers = args.tickers or load_watchlist(watchlist_path) or None

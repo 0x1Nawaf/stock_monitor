@@ -1,4 +1,3 @@
-"""Telegram Bot API notification sender for stock monitor alerts."""
 from __future__ import annotations
 
 import json
@@ -8,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from stock_monitor.analyzer import StockAnalysis
+    from stock_monitor.gainers import Gainer
     from stock_monitor.news import NewsMover
 
 log = logging.getLogger(__name__)
@@ -58,7 +58,6 @@ def _clear_message_ids() -> None:
 
 
 def clear_previous() -> None:
-    """Delete all recent bot messages from the chat by sweeping backwards."""
     creds = _get_credentials()
     if creds is None:
         return
@@ -121,7 +120,6 @@ def _send(token: str, chat_id: str, text: str) -> bool:
 
 
 def sendMessage(res: StockAnalysis) -> bool:
-    """Send a per-ticker analysis alert."""
     creds = _get_credentials()
     if creds is None:
         return False
@@ -165,8 +163,52 @@ def sendMessage(res: StockAnalysis) -> bool:
     return _send(token, chat_id, text)
 
 
+def sendGainersMessage(gainers: list[Gainer]) -> bool:
+    creds = _get_credentials()
+    if creds is None:
+        return False
+    token, chat_id = creds
+
+    if not gainers:
+        text = "📈 <b>Top Gainers</b>\n\nNo significant gainers found at this time."
+        return _send(token, chat_id, text)
+
+    lines = ["📈 <b>Top Gainers Today</b>\n"]
+
+    for i, g in enumerate(gainers[:15], 1):
+        vol_str = ""
+        if g.volume_ratio >= 2.0:
+            vol_str = f"  🔥 {g.volume_ratio:.1f}x vol"
+
+        cap_str = ""
+        if g.market_cap >= 1e12:
+            cap_str = f"  ({g.market_cap / 1e12:.1f}T)"
+        elif g.market_cap >= 1e9:
+            cap_str = f"  ({g.market_cap / 1e9:.1f}B)"
+
+        lines.append(
+            f"<b>{i}. {g.ticker}</b>  ${g.price:.2f}  "
+            f"<b>{g.change_pct:+.2f}%</b>{vol_str}{cap_str}"
+        )
+        if g.company and g.company != g.ticker:
+            name = g.company if len(g.company) <= 40 else g.company[:37] + "..."
+            lines.append(f"   <i>{name}</i>")
+
+    lines.append("")
+
+    high_vol = [g for g in gainers if g.volume_ratio >= 2.0]
+    if high_vol:
+        lines.append(
+            f"🔥 {len(high_vol)} stock(s) trading at 2x+ average volume"
+        )
+
+    lines.append("\n<i>Not financial advice. Do your own research.</i>")
+    text = "\n".join(lines)
+
+    return _send(token, chat_id, text)
+
+
 def sendNewsMessage(movers: list[NewsMover]) -> bool:
-    """Send a news scanner summary alert."""
     creds = _get_credentials()
     if creds is None:
         return False

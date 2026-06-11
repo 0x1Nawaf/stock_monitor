@@ -1,4 +1,3 @@
-"""Shared Yahoo Finance HTTP client with session reuse and retry logic."""
 from __future__ import annotations
 
 import logging
@@ -32,7 +31,6 @@ def _get_session() -> requests.Session:
 
 
 def get_session() -> requests.Session:
-    """Return the shared HTTP session (connection-pooled)."""
     return _get_session()
 
 
@@ -42,10 +40,6 @@ def fetch_chart(
     interval: str = "1d",
     timeout: int = _TIMEOUT,
 ) -> Optional[dict[str, Any]]:
-    """Fetch Yahoo chart data with automatic retry on 429 rate limits.
-
-    Returns the full JSON response dict, or None on failure.
-    """
     session = _get_session()
     url = f"{_YAHOO_BASE}/{ticker}"
     params = {"range": range_, "interval": interval, "includePrePost": "false"}
@@ -75,10 +69,6 @@ def fetch_chart(
 
 
 def fetch_quote(ticker: str) -> tuple[float, float]:
-    """Fetch current price and daily change % for a ticker.
-
-    Returns (price, change_pct). Falls back to (0.0, 0.0) on failure.
-    """
     data = fetch_chart(ticker, range_="1d", interval="1d", timeout=10)
     if data is None:
         return 0.0, 0.0

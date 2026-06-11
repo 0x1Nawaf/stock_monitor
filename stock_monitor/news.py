@@ -19,10 +19,6 @@ _TIMEOUT = 15
 _TICKER_CACHE_PATH = MODELS_DIR / "ticker_list.json"
 _TICKER_CACHE_MAX_AGE = 7 * 86400
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
 @dataclass
 class NewsItem:
     headline: str
@@ -53,10 +49,6 @@ class NewsMover:
             "top_headlines": self.top_headlines,
         }
 
-
-# ---------------------------------------------------------------------------
-# Fallback company name -> ticker mapping (used when NASDAQ download fails)
-# ---------------------------------------------------------------------------
 
 _FALLBACK_TICKERS: dict[str, str] = {
     "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
@@ -113,7 +105,6 @@ _NAME_STRIP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Short ticker symbols that are also common English words -- require $-prefix
 _AMBIGUOUS_TICKERS: set[str] = {
     "A", "AN", "ALL", "AM", "ARE", "AT", "BE", "BIG", "CAN",
     "CAR", "DAY", "DD", "DO", "E", "F", "FOR", "GO", "HAS",
@@ -123,16 +114,7 @@ _AMBIGUOUS_TICKERS: set[str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Dynamic ticker list from NASDAQ
-# ---------------------------------------------------------------------------
-
 def _load_ticker_list() -> dict[str, str]:
-    """Download or load cached full US stock listing from NASDAQ API.
-
-    Returns a raw mapping of {ticker: company_name}.
-    Cached to disk for 7 days.
-    """
     if _TICKER_CACHE_PATH.exists():
         age = time.time() - _TICKER_CACHE_PATH.stat().st_mtime
         if age < _TICKER_CACHE_MAX_AGE:
@@ -178,13 +160,6 @@ def _load_ticker_list() -> dict[str, str]:
 
 
 def _build_ticker_lookup(raw_list: dict[str, str]) -> dict[str, str]:
-    """Build a name->ticker lookup dict from the NASDAQ download.
-
-    Produces entries like:
-        "carvana" -> "CVNA"
-        "advanced micro devices" -> "AMD"
-        "amd" -> "AMD"
-    """
     lookup: dict[str, str] = {}
 
     for ticker, full_name in raw_list.items():
@@ -214,11 +189,6 @@ def _build_ticker_lookup(raw_list: dict[str, str]) -> dict[str, str]:
 def _compile_patterns(
     lookup: dict[str, str],
 ) -> list[tuple[re.Pattern, str]]:
-    """Compile regex patterns for all lookup entries.
-
-    Multi-word names get word-boundary matching.
-    Single short names that could be ambiguous are skipped (handled by $TICKER regex).
-    """
     patterns: list[tuple[re.Pattern, str]] = []
     seen_tickers: dict[str, str] = {}
 
@@ -247,14 +217,12 @@ def _compile_patterns(
     return patterns
 
 
-# Module-level state, populated lazily in scan_news()
 _ticker_lookup: dict[str, str] = {}
 _ticker_patterns: list[tuple[re.Pattern, str]] = []
 _all_valid_tickers: set[str] = set()
 
 
 def _ensure_ticker_data() -> None:
-    """Load ticker list and compile patterns (once per process)."""
     global _ticker_lookup, _ticker_patterns, _all_valid_tickers
     if _ticker_patterns:
         return
@@ -263,10 +231,6 @@ def _ensure_ticker_data() -> None:
     _ticker_patterns = _compile_patterns(_ticker_lookup)
     _all_valid_tickers = set(raw.keys()) | set(_FALLBACK_TICKERS.values())
 
-
-# ---------------------------------------------------------------------------
-# Ticker extraction (dynamic)
-# ---------------------------------------------------------------------------
 
 def _extract_tickers(text: str) -> list[str]:
     tickers: set[str] = set()
@@ -282,10 +246,6 @@ def _extract_tickers(text: str) -> list[str]:
 
     return sorted(tickers)
 
-
-# ---------------------------------------------------------------------------
-# Keyword scoring engine
-# ---------------------------------------------------------------------------
 
 POSITIVE_KEYWORDS: dict[str, float] = {
     "fda approval": 10, "fda approved": 10, "fda clears": 10,
@@ -368,10 +328,6 @@ def _deduplicate(items: list[NewsItem]) -> list[NewsItem]:
     return unique
 
 
-# ---------------------------------------------------------------------------
-# Fetchers -- RSS
-# ---------------------------------------------------------------------------
-
 def _fetch_rss(url: str, source_name: str) -> list[NewsItem]:
     items: list[NewsItem] = []
     try:
@@ -429,10 +385,6 @@ def fetch_google_news() -> list[NewsItem]:
     return items
 
 
-# ---------------------------------------------------------------------------
-# Fetchers -- Finviz
-# ---------------------------------------------------------------------------
-
 def _get_bs4():
     try:
         from bs4 import BeautifulSoup
@@ -443,7 +395,6 @@ def _get_bs4():
 
 
 def fetch_finviz_news() -> list[NewsItem]:
-    """Scrape the Finviz general news page."""
     BeautifulSoup = _get_bs4()
     if BeautifulSoup is None:
         return []
@@ -481,11 +432,6 @@ def fetch_finviz_news() -> list[NewsItem]:
 
 
 def fetch_finviz_screener() -> list[NewsItem]:
-    """Scrape Finviz signal pages: top gainers, new highs, most active.
-
-    These pages have tickers explicitly in the table rows, so we get
-    ticker-tagged news without needing name-based extraction.
-    """
     BeautifulSoup = _get_bs4()
     if BeautifulSoup is None:
         return []
@@ -553,7 +499,6 @@ def fetch_finviz_screener() -> list[NewsItem]:
 
 
 def fetch_finviz_ticker_news(ticker: str) -> list[NewsItem]:
-    """Fetch news headlines for a specific ticker from its Finviz quote page."""
     BeautifulSoup = _get_bs4()
     if BeautifulSoup is None:
         return []
@@ -598,19 +543,10 @@ def fetch_finviz_ticker_news(ticker: str) -> list[NewsItem]:
     return items
 
 
-# ---------------------------------------------------------------------------
-# Live price quote (lightweight, for news movers)
-# ---------------------------------------------------------------------------
-
 _fetch_quote = fetch_quote
 
 
-# ---------------------------------------------------------------------------
-# Aggregation and main entry point
-# ---------------------------------------------------------------------------
-
 def _aggregate_movers(all_items: list[NewsItem]) -> dict[str, list[NewsItem]]:
-    """Group positive-scoring items by ticker."""
     ticker_items: dict[str, list[NewsItem]] = {}
     for item in all_items:
         if item.score <= 0:
@@ -652,22 +588,10 @@ def _build_movers(ticker_items: dict[str, list[NewsItem]]) -> list[NewsMover]:
 
 
 def scan_news(watchlist: list[str] | None = None) -> list[NewsMover]:
-    """Fetch news from all sources, score, aggregate, return movers >= 5%.
-
-    Args:
-        watchlist: Optional list of tickers to always include in the scan.
-                   Their per-ticker news is fetched regardless of pass 1 results.
-
-    Two-pass approach:
-      Pass 1: Fetch from RSS + Finviz general + Finviz screener, identify candidates.
-      Pass 2: For each candidate ticker (+ watchlist), fetch its dedicated Finviz
-              page for additional headlines, then re-aggregate.
-    """
     _ensure_ticker_data()
 
     watchlist_set = {t.upper() for t in (watchlist or [])}
 
-    # --- Pass 1: broad fetch ---
     log.info("Fetching news from Yahoo Finance...")
     yahoo = fetch_yahoo_news()
     log.info("Fetched %d headlines from Yahoo", len(yahoo))
@@ -698,7 +622,6 @@ def scan_news(watchlist: list[str] | None = None) -> list[NewsMover]:
         log.info("Watchlist tickers added to candidates: %s", ", ".join(sorted(watchlist_set)))
     log.info("Pass 1 candidate tickers: %d", len(candidate_tickers))
 
-    # --- Pass 2: per-ticker deep fetch ---
     extra_items: list[NewsItem] = []
     fetched = 0
     for ticker in sorted(candidate_tickers):
@@ -723,10 +646,6 @@ def scan_news(watchlist: list[str] | None = None) -> list[NewsMover]:
     log.info("Found %d news movers with predicted gain >= 5%%", len(movers))
     return movers
 
-
-# ---------------------------------------------------------------------------
-# Formatting helpers (used by monitor.py)
-# ---------------------------------------------------------------------------
 
 def format_news_text(movers: list[NewsMover]) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
