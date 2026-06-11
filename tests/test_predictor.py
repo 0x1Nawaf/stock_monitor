@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from stock_monitor.models.lstm_clf import (
+from stock_monitor.model.lstm_clf import (
     StockLSTMClassifier,
     _build_sequences,
 )

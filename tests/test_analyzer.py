@@ -4,13 +4,13 @@ import numpy as np
 import pytest
 
 from stock_monitor.config import Signal, SIGNAL_THRESHOLDS, DAILY_SIGNAL_THRESHOLDS
-from stock_monitor.models.ensemble import (
+from stock_monitor.model.ensemble import (
     combine_predictions,
     prediction_to_signal,
     EnsemblePrediction,
 )
-from stock_monitor.models.gbm import GBMPrediction
-from stock_monitor.models.lstm_clf import LSTMPrediction
+from stock_monitor.model.gbm import GBMPrediction
+from stock_monitor.model.lstm_clf import LSTMPrediction
 from stock_monitor.targets import TargetClass
 
 

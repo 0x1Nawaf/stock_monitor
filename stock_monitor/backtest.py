@@ -49,7 +49,7 @@ def walk_forward_backtest(
     vix_df: Optional[pd.DataFrame] = None,
     model_type: str = "gbm",
 ) -> Optional[BacktestResult]:
-    from .models.gbm import train_gbm, predict_gbm_batch
+    from .model.gbm import train_gbm, predict_gbm_batch
 
     df = fetch_stock_data(ticker)
     if df is None:

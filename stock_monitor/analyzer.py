@@ -16,9 +16,9 @@ from .targets import (
     get_class_weights,
     TargetClass,
 )
-from .models.gbm import train_gbm, predict_gbm, GBMPrediction
-from .models.lstm_clf import train_lstm_classifier, predict_lstm, LSTMPrediction
-from .models.ensemble import combine_predictions, prediction_to_signal, EnsemblePrediction
+from .model.gbm import train_gbm, predict_gbm, GBMPrediction
+from .model.lstm_clf import train_lstm_classifier, predict_lstm, LSTMPrediction
+from .model.ensemble import combine_predictions, prediction_to_signal, EnsemblePrediction
 
 log = logging.getLogger(__name__)
 
