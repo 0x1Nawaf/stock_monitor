@@ -141,30 +141,43 @@ def prediction_to_signal(
     conviction = net_edge * prediction.ensemble_agreement
     score = int(max(-100, min(100, conviction * 300)))
 
+    strong_buy_t = thresholds.get(Signal.STRONG_BUY, 0.04)
+    buy_t = thresholds.get(Signal.BUY, 0.02)
+    lean_buy_t = thresholds.get(Signal.LEAN_BUY, 0.005)
+    lean_sell_t = thresholds.get(Signal.LEAN_SELL, -0.005)
+    sell_t = thresholds.get(Signal.SELL, -0.02)
+    strong_sell_t = thresholds.get(Signal.STRONG_SELL, -0.04)
+
+    scale = strong_buy_t / 0.04 if strong_buy_t > 0 else 1.0
+    prob_strong = 0.20 * scale
+    prob_buy = 0.10 * scale
+    prob_lean = 0.03 * scale
+    prob_flat_edge = lean_buy_t * 2
+
     reasons = []
 
     if prediction.predicted_class == TargetClass.UP:
-        if prob_up > prob_down + 0.20 and prediction.ensemble_agreement >= 0.9:
+        if prob_up > prob_down + prob_strong and prediction.ensemble_agreement >= 0.9:
             signal = Signal.STRONG_BUY
-        elif prob_up > prob_down + 0.10:
+        elif prob_up > prob_down + prob_buy:
             signal = Signal.BUY
-        elif prob_up > prob_down + 0.03:
+        elif prob_up > prob_down + prob_lean:
             signal = Signal.LEAN_BUY
         else:
             signal = Signal.HOLD
     elif prediction.predicted_class == TargetClass.DOWN:
-        if prob_down > prob_up + 0.20 and prediction.ensemble_agreement >= 0.9:
+        if prob_down > prob_up + prob_strong and prediction.ensemble_agreement >= 0.9:
             signal = Signal.STRONG_SELL
-        elif prob_down > prob_up + 0.10:
+        elif prob_down > prob_up + prob_buy:
             signal = Signal.SELL
-        elif prob_down > prob_up + 0.03:
+        elif prob_down > prob_up + prob_lean:
             signal = Signal.LEAN_SELL
         else:
             signal = Signal.HOLD
     else:
-        if edge_up > 0.08:
+        if edge_up > prob_flat_edge:
             signal = Signal.LEAN_BUY
-        elif edge_down > 0.08:
+        elif edge_down > prob_flat_edge:
             signal = Signal.LEAN_SELL
         else:
             signal = Signal.HOLD

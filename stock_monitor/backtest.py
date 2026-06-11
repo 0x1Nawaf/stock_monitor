@@ -7,7 +7,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .config import TimeframeConfig, TIMEFRAME_5D
+from .config import TimeframeConfig, TIMEFRAME_5D, GBM_PARAMS
 from .data import fetch_stock_data
 from .features import build_all_features
 from .targets import (
@@ -40,6 +40,90 @@ def _non_overlapping_indices(n: int, horizon: int) -> np.ndarray:
     return np.arange(0, n, horizon)
 
 
+def _train_gbm_fold(
+    train_X: np.ndarray, train_y: np.ndarray
+) -> object:
+    import lightgbm as lgb
+
+    class_weights = get_class_weights(train_y)
+    valid_train = train_y >= 0
+    X_tr = train_X[valid_train]
+    y_tr = train_y[valid_train].astype(int)
+    sample_weights = np.array([class_weights.get(int(c), 1.0) for c in y_tr])
+
+    split = int(len(X_tr) * 0.85)
+    train_data = lgb.Dataset(X_tr[:split], label=y_tr[:split], weight=sample_weights[:split])
+    val_data = lgb.Dataset(X_tr[split:], label=y_tr[split:], reference=train_data)
+
+    callbacks = [
+        lgb.early_stopping(stopping_rounds=30, verbose=False),
+        lgb.log_evaluation(period=0),
+    ]
+    return lgb.train(
+        GBM_PARAMS, train_data, num_boost_round=500,
+        valid_sets=[val_data], callbacks=callbacks,
+    )
+
+
+def _train_lstm_fold(
+    train_X: np.ndarray,
+    train_y: np.ndarray,
+    seq_len: int,
+) -> Optional[object]:
+    from .model.lstm_clf import train_lstm_classifier
+
+    try:
+        model = train_lstm_classifier(
+            "__backtest__", train_X, train_y,
+            force=True, seq_len=seq_len,
+        )
+        return model
+    except Exception as exc:
+        log.warning("Backtest LSTM fold failed: %s", exc)
+        return None
+
+
+def _predict_fold(
+    model_type: str,
+    gbm_model: object,
+    lstm_model: Optional[object],
+    test_X: np.ndarray,
+    seq_len: int,
+) -> np.ndarray:
+    from .model.ensemble import combine_predictions, DEFAULT_GBM_WEIGHT, DEFAULT_LSTM_WEIGHT
+    from .model.gbm import GBMPrediction
+    from .model.lstm_clf import predict_lstm, LSTMPrediction
+
+    gbm_probs = gbm_model.predict(test_X)
+
+    if model_type != "ensemble" or lstm_model is None:
+        return np.argmax(gbm_probs, axis=1)
+
+    preds = []
+    for i in range(len(test_X)):
+        gbm_pred = GBMPrediction(
+            predicted_class=int(np.argmax(gbm_probs[i])),
+            probabilities=gbm_probs[i],
+            confidence=float(gbm_probs[i].max()),
+            model_age_days=0.0,
+        )
+
+        lstm_pred = None
+        try:
+            lstm_pred_result = predict_lstm(
+                "__backtest__", lstm_model, test_X[:i + 1],
+                seq_len=seq_len,
+            )
+            lstm_pred = lstm_pred_result
+        except Exception:
+            pass
+
+        ensemble = combine_predictions(gbm_pred, lstm_pred)
+        preds.append(ensemble.predicted_class)
+
+    return np.array(preds)
+
+
 def walk_forward_backtest(
     ticker: str,
     timeframe: TimeframeConfig = TIMEFRAME_5D,
@@ -47,10 +131,8 @@ def walk_forward_backtest(
     test_months: int = 3,
     market_df: Optional[pd.DataFrame] = None,
     vix_df: Optional[pd.DataFrame] = None,
-    model_type: str = "gbm",
+    model_type: str = "ensemble",
 ) -> Optional[BacktestResult]:
-    from .model.gbm import train_gbm, predict_gbm_batch
-
     df = fetch_stock_data(ticker)
     if df is None:
         log.warning("Backtest %s: no data", ticker)
@@ -105,48 +187,18 @@ def walk_forward_backtest(
         test_y = test_y[valid_test]
         test_rets = test_rets[valid_test]
 
-        if model_type == "gbm":
-            class_weights = get_class_weights(train_y)
-            import lightgbm as lgb
+        gbm_model = _train_gbm_fold(train_X, train_y)
 
-            valid_train = train_y >= 0
-            X_tr = train_X[valid_train]
-            y_tr = train_y[valid_train].astype(int)
-            sample_weights = np.array([class_weights.get(int(c), 1.0) for c in y_tr])
-
-            split = int(len(X_tr) * 0.85)
-            train_data = lgb.Dataset(X_tr[:split], label=y_tr[:split], weight=sample_weights[:split])
-            val_data = lgb.Dataset(X_tr[split:], label=y_tr[split:], reference=train_data)
-
-            params = {
-                "objective": "multiclass",
-                "num_class": 3,
-                "metric": "multi_logloss",
-                "boosting_type": "gbdt",
-                "num_leaves": 31,
-                "learning_rate": 0.05,
-                "feature_fraction": 0.8,
-                "bagging_fraction": 0.8,
-                "bagging_freq": 5,
-                "min_child_samples": 20,
-                "lambda_l1": 0.1,
-                "lambda_l2": 0.1,
-                "verbose": -1,
-                "seed": 42,
-            }
-            callbacks = [
-                lgb.early_stopping(stopping_rounds=30, verbose=False),
-                lgb.log_evaluation(period=0),
-            ]
-            model = lgb.train(
-                params, train_data, num_boost_round=500,
-                valid_sets=[val_data], callbacks=callbacks,
+        lstm_model = None
+        if model_type == "ensemble":
+            lstm_model = _train_lstm_fold(
+                train_X, train_y, seq_len=timeframe.sequence_length,
             )
-            probs = model.predict(test_X)
-            preds = np.argmax(probs, axis=1)
-        else:
-            start += test_size
-            continue
+
+        preds = _predict_fold(
+            model_type, gbm_model, lstm_model,
+            test_X, seq_len=timeframe.sequence_length,
+        )
 
         all_preds.extend(preds.tolist())
         all_actuals.extend(test_y.astype(int).tolist())
@@ -235,5 +287,5 @@ def format_backtest_report(results: list[BacktestResult]) -> str:
         )
 
     lines.append("")
-    lines.append("Walk-forward: train 3y, test 3mo rolling, non-overlapping predictions")
+    lines.append("Walk-forward: train 3y, test 3mo rolling, non-overlapping predictions (ensemble)")
     return "\n".join(lines)

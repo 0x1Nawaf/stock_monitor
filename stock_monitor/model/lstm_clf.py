@@ -165,7 +165,7 @@ def train_lstm_classifier(
         torch.from_numpy(X_val_seq),
         torch.from_numpy(y_val_seq),
     )
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
     device = _get_device()
@@ -239,6 +239,9 @@ def train_lstm_classifier(
     }
     torch.save(save_data, _model_path(ticker, models_dir))
 
+    model.scaler_mean_ = scaler.mean_
+    model.scaler_scale_ = scaler.scale_
+
     return model
 
 
@@ -260,6 +263,8 @@ def _load_model(
         )
         model.load_state_dict(data["model_state"])
         model.eval()
+        model.scaler_mean_ = data["scaler_mean"]
+        model.scaler_scale_ = data["scaler_scale"]
         return model
     except Exception as exc:
         log.warning("Failed to load LSTM classifier for %s: %s", ticker, exc)
@@ -275,17 +280,20 @@ def predict_lstm(
 ) -> LSTMPrediction:
     from sklearn.preprocessing import StandardScaler
 
-    path = _model_path(ticker, models_dir)
-    if not path.exists():
-        return LSTMPrediction(
-            predicted_class=1, probabilities=np.array([0.33, 0.34, 0.33]),
-            confidence=0.34, model_age_days=0.0,
-        )
+    if not hasattr(model, "scaler_mean_") or model.scaler_mean_ is None:
+        path = _model_path(ticker, models_dir)
+        if not path.exists():
+            return LSTMPrediction(
+                predicted_class=1, probabilities=np.array([0.33, 0.34, 0.33]),
+                confidence=0.34, model_age_days=0.0,
+            )
+        data = torch.load(path, map_location="cpu", weights_only=False)
+        model.scaler_mean_ = data["scaler_mean"]
+        model.scaler_scale_ = data["scaler_scale"]
 
-    data = torch.load(path, map_location="cpu", weights_only=False)
     scaler = StandardScaler()
-    scaler.mean_ = data["scaler_mean"]
-    scaler.scale_ = data["scaler_scale"]
+    scaler.mean_ = model.scaler_mean_
+    scaler.scale_ = model.scaler_scale_
     scaler.var_ = scaler.scale_ ** 2
     scaler.n_features_in_ = len(scaler.mean_)
 
@@ -317,6 +325,7 @@ def predict_lstm(
     predicted_class = int(np.argmax(avg_probs))
     confidence = float(avg_probs[predicted_class])
 
+    path = _model_path(ticker, models_dir)
     age = (time.time() - path.stat().st_mtime) / 86400 if path.exists() else 0.0
 
     return LSTMPrediction(

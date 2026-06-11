@@ -108,10 +108,6 @@ def parse_args() -> argparse.Namespace:
         help="Scan news for stocks likely to gain 5+",
     )
     parser.add_argument(
-        "--cross", action="store_true",
-        help="Use cross-sectional model (single model trained on all tickers)",
-    )
-    parser.add_argument(
         "--backtest", action="store_true",
         help="Run walk-forward backtest and print accuracy report",
     )
@@ -297,18 +293,21 @@ def run_news(output_json: bool, tickers: list[str] | None = None) -> None:
 def run_backtest(
     tickers: list[str],
     timeframe: TimeframeConfig = TIMEFRAME_5D,
+    use_lstm: bool = True,
 ) -> None:
     from stock_monitor.backtest import walk_forward_backtest, format_backtest_report
     from stock_monitor.market_data import get_market_context
 
     market_df, vix_df = get_market_context()
+    model_type = "ensemble" if use_lstm else "gbm"
 
     results = []
     for ticker in tickers:
-        log.info("Backtesting %s...", ticker)
+        log.info("Backtesting %s (%s)...", ticker, model_type)
         result = walk_forward_backtest(
             ticker, timeframe=timeframe,
             market_df=market_df, vix_df=vix_df,
+            model_type=model_type,
         )
         if result is not None:
             results.append(result)
@@ -360,7 +359,7 @@ def main() -> None:
     use_lstm = not args.no_lstm
 
     if args.backtest:
-        run_backtest(tickers, timeframe=timeframe)
+        run_backtest(tickers, timeframe=timeframe, use_lstm=use_lstm)
         return
 
     if args.daemon:

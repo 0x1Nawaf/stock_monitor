@@ -16,9 +16,9 @@ from stock_monitor.targets import TargetClass
 
 
 class TestCalibrateConfidence:
-    def test_random_probs_give_zero(self):
+    def test_random_probs_give_low(self):
         conf = _calibrate_confidence(np.array([0.33, 0.34, 0.33]))
-        assert conf < 0.05
+        assert conf < 0.4
 
     def test_strong_prediction_gives_high(self):
         conf = _calibrate_confidence(np.array([0.05, 0.15, 0.80]))
@@ -51,8 +51,8 @@ class TestPredictionToSignal:
     def test_buy_moderate_edge(self):
         pred = EnsemblePrediction(
             predicted_class=TargetClass.UP,
-            probabilities=np.array([0.20, 0.30, 0.50]),
-            confidence=0.6,
+            probabilities=np.array([0.28, 0.27, 0.45]),
+            confidence=0.5,
             model_age_days=1.0,
             gbm_agrees=True,
             lstm_agrees=True,

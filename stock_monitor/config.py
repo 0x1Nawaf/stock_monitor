@@ -100,13 +100,6 @@ GBM_PARAMS = {
     "seed": 42,
 }
 
-CLASSIFICATION_THRESHOLDS = {
-    1: (0.008, -0.008),
-    5: (0.02, -0.02),
-    10: (0.03, -0.03),
-    21: (0.05, -0.05),
-}
-
 
 @dataclass(frozen=True)
 class TimeframeConfig:

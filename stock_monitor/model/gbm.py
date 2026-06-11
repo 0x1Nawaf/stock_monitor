@@ -8,7 +8,7 @@ from typing import Optional
 
 import numpy as np
 
-from ..config import MODELS_DIR, MODEL_MAX_AGE_DAYS
+from ..config import MODELS_DIR, MODEL_MAX_AGE_DAYS, GBM_PARAMS
 
 log = logging.getLogger(__name__)
 
@@ -68,30 +68,13 @@ def train_gbm(
     train_data = lgb.Dataset(X_train, label=y_train, weight=sample_weights)
     val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
 
-    params = {
-        "objective": "multiclass",
-        "num_class": 3,
-        "metric": "multi_logloss",
-        "boosting_type": "gbdt",
-        "num_leaves": 31,
-        "learning_rate": 0.05,
-        "feature_fraction": 0.8,
-        "bagging_fraction": 0.8,
-        "bagging_freq": 5,
-        "min_child_samples": 20,
-        "lambda_l1": 0.1,
-        "lambda_l2": 0.1,
-        "verbose": -1,
-        "seed": 42,
-    }
-
     callbacks = [
         lgb.early_stopping(stopping_rounds=30, verbose=False),
         lgb.log_evaluation(period=0),
     ]
 
     model = lgb.train(
-        params,
+        GBM_PARAMS,
         train_data,
         num_boost_round=500,
         valid_sets=[val_data],
@@ -150,63 +133,3 @@ def predict_gbm_batch(
     return model.predict(features)
 
 
-def train_gbm_cross_sectional(
-    features: np.ndarray,
-    targets: np.ndarray,
-    models_dir: Path = MODELS_DIR,
-    class_weights: Optional[dict[int, float]] = None,
-) -> object:
-    import lightgbm as lgb
-
-    valid_mask = targets >= 0
-    X = features[valid_mask]
-    y = targets[valid_mask].astype(int)
-
-    split_idx = int(len(X) * 0.85)
-    X_train, X_val = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
-
-    if class_weights is not None:
-        sample_weights = np.array([class_weights.get(int(c), 1.0) for c in y_train])
-    else:
-        sample_weights = None
-
-    train_data = lgb.Dataset(X_train, label=y_train, weight=sample_weights)
-    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
-
-    params = {
-        "objective": "multiclass",
-        "num_class": 3,
-        "metric": "multi_logloss",
-        "boosting_type": "gbdt",
-        "num_leaves": 63,
-        "learning_rate": 0.03,
-        "feature_fraction": 0.7,
-        "bagging_fraction": 0.7,
-        "bagging_freq": 5,
-        "min_child_samples": 30,
-        "lambda_l1": 0.2,
-        "lambda_l2": 0.2,
-        "verbose": -1,
-        "seed": 42,
-    }
-
-    callbacks = [
-        lgb.early_stopping(stopping_rounds=50, verbose=False),
-        lgb.log_evaluation(period=0),
-    ]
-
-    model = lgb.train(
-        params,
-        train_data,
-        num_boost_round=1000,
-        valid_sets=[val_data],
-        callbacks=callbacks,
-    )
-
-    path = models_dir / "cross_sectional_gbm.txt"
-    models_dir.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(path))
-    log.info("Cross-sectional GBM trained: %d rounds on %d samples", model.best_iteration, len(X_train))
-
-    return model

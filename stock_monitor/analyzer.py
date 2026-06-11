@@ -148,9 +148,9 @@ def _current_indicators(
 def _estimated_return_from_probs(probs: np.ndarray, horizon: int) -> float:
     up_thresh, down_thresh = get_thresholds(horizon)
     expected = (
-        probs[TargetClass.UP] * up_thresh * 1.5
+        probs[TargetClass.UP] * up_thresh
         + probs[TargetClass.FLAT] * 0.0
-        + probs[TargetClass.DOWN] * down_thresh * 1.5
+        + probs[TargetClass.DOWN] * down_thresh
     )
     return float(expected)
 
