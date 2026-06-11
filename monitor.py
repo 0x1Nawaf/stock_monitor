@@ -296,10 +296,13 @@ def run_news(output_json: bool, tickers: list[str] | None = None) -> None:
     sys.stdout.flush()
 
 
-def run_gainers(output_json: bool) -> None:
-    from stock_monitor.gainers import scan_gainers, format_gainers_text, format_gainers_json
+def run_gainers(output_json: bool, use_lstm: bool = True) -> None:
+    from stock_monitor.gainers import scan_gainers, analyze_gainers, format_gainers_text, format_gainers_json
 
     gainers = scan_gainers()
+
+    if gainers:
+        analyze_gainers(gainers, use_lstm=use_lstm, max_workers=4)
 
     sendGainersMessage(gainers)
 
@@ -358,7 +361,7 @@ def main() -> None:
         default_tickers = DEFAULT_TICKERS
 
     if args.gainers:
-        run_gainers(output_json=args.json)
+        run_gainers(output_json=args.json, use_lstm=not args.no_lstm)
         return
 
     if args.news:

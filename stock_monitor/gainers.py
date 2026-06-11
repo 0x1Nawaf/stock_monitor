@@ -16,6 +16,46 @@ _TIMEOUT = 15
 
 
 @dataclass
+class GainerAnalysis:
+    signal: str = "HOLD"
+    score: int = 0
+    predicted_return_pct: float = 0.0
+    confidence: float = 0.0
+    stop_loss: float = 0.0
+    support: float = 0.0
+    resistance: float = 0.0
+    sma_20: float = 0.0
+    sma_50: float = 0.0
+    rsi: float = 0.0
+    prob_up: float = 0.0
+    prob_down: float = 0.0
+    prob_flat: float = 0.0
+    reasons: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "signal": self.signal,
+            "score": self.score,
+            "predicted_return_pct": self.predicted_return_pct,
+            "confidence": self.confidence,
+            "stop_loss": self.stop_loss,
+            "support": self.support,
+            "resistance": self.resistance,
+            "sma_20": self.sma_20,
+            "sma_50": self.sma_50,
+            "rsi": self.rsi,
+            "prob_up": self.prob_up,
+            "prob_down": self.prob_down,
+            "prob_flat": self.prob_flat,
+            "reasons": self.reasons,
+            "risks": self.risks,
+            "error": self.error,
+        }
+
+
+@dataclass
 class Gainer:
     ticker: str
     company: str
@@ -30,9 +70,10 @@ class Gainer:
     day_high: float = 0.0
     day_low: float = 0.0
     source: str = ""
+    analysis: Optional[GainerAnalysis] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "ticker": self.ticker,
             "company": self.company,
             "price": self.price,
@@ -46,6 +87,9 @@ class Gainer:
             "day_high": self.day_high,
             "day_low": self.day_low,
         }
+        if self.analysis:
+            d["analysis"] = self.analysis.to_dict()
+        return d
 
 
 _SCREENER_URL = (
@@ -379,6 +423,111 @@ def scan_gainers(
     return result
 
 
+def _assess_risks(g: Gainer, a: GainerAnalysis) -> list[str]:
+    risks = []
+
+    if g.change_pct > 20:
+        risks.append(f"Extreme rally (+{g.change_pct:.0f}%) -- high reversal risk")
+    elif g.change_pct > 10:
+        risks.append(f"Sharp rally (+{g.change_pct:.0f}%) -- pullback likely")
+
+    if a.rsi > 80:
+        risks.append(f"RSI at {a.rsi:.0f} -- severely overbought")
+    elif a.rsi > 70:
+        risks.append(f"RSI at {a.rsi:.0f} -- overbought territory")
+
+    if g.volume_ratio < 1.0 and g.volume_ratio > 0:
+        risks.append("Below-average volume -- weak conviction behind move")
+
+    if g.market_cap > 0 and g.market_cap < 100e6:
+        risks.append("Micro-cap stock -- high volatility and liquidity risk")
+    elif g.market_cap > 0 and g.market_cap < 500e6:
+        risks.append("Small-cap -- higher volatility than large caps")
+
+    if a.prob_down > 0.35:
+        risks.append(f"Model sees {a.prob_down:.0%} chance of decline")
+
+    if a.confidence < 0.4 and a.confidence > 0:
+        risks.append(f"Low model confidence ({a.confidence:.0%})")
+
+    if g.price > 0 and a.sma_50 > 0 and g.price > a.sma_50 * 1.15:
+        pct_above = (g.price / a.sma_50 - 1) * 100
+        risks.append(f"Extended {pct_above:.0f}% above SMA(50) -- stretched")
+
+    if not risks:
+        risks.append("No major risk flags detected")
+
+    return risks
+
+
+def analyze_gainers(
+    gainers: list[Gainer],
+    use_lstm: bool = True,
+    max_workers: int = 4,
+) -> None:
+    from .analyzer import analyze
+    from .market_data import get_market_context
+    from .config import TIMEFRAME_5D
+
+    market_df = None
+    vix_df = None
+    try:
+        market_df, vix_df = get_market_context()
+    except Exception as exc:
+        log.warning("Failed to fetch market context: %s", exc)
+
+    def _analyze_one(g: Gainer) -> None:
+        try:
+            result = analyze(
+                g.ticker,
+                force_retrain=False,
+                timeframe=TIMEFRAME_5D,
+                market="US",
+                currency="$",
+                market_df=market_df,
+                vix_df=vix_df,
+                use_lstm=use_lstm,
+            )
+
+            ga = GainerAnalysis(
+                signal=result.signal.value,
+                score=result.score,
+                predicted_return_pct=result.predicted_return_pct,
+                confidence=result.confidence,
+                stop_loss=result.stop_loss,
+                support=result.support,
+                resistance=result.resistance,
+                sma_20=result.sma_20,
+                sma_50=result.sma_50,
+                rsi=result.rsi,
+                prob_up=result.prob_up,
+                prob_down=result.prob_down,
+                prob_flat=result.prob_flat,
+                reasons=result.reasons,
+                error=result.error,
+            )
+            ga.risks = _assess_risks(g, ga)
+            g.analysis = ga
+        except Exception as exc:
+            log.warning("Analysis failed for %s: %s", g.ticker, exc)
+            g.analysis = GainerAnalysis(error=str(exc))
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    log.info("Running ML analysis on %d gainers with %d workers...", len(gainers), max_workers)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_analyze_one, g): g for g in gainers}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            g = futures[future]
+            try:
+                future.result()
+                log.info("Analyzed %s (%d/%d)", g.ticker, done, len(gainers))
+            except Exception as exc:
+                log.error("Failed %s: %s", g.ticker, exc)
+
+
 def _format_market_cap(cap: float) -> str:
     if cap <= 0:
         return "    N/A"
@@ -401,10 +550,19 @@ def _format_volume(vol: int) -> str:
     return f"{vol:>7d}"
 
 
+def _signal_icon(signal: str) -> str:
+    icons = {
+        "STRONG BUY": "[++]", "BUY": "[+ ]", "LEAN BUY": "[ +]",
+        "HOLD": "[ = ]",
+        "LEAN SELL": "[ -]", "SELL": "[- ]", "STRONG SELL": "[--]",
+    }
+    return icons.get(signal, "[ ? ]")
+
+
 def format_gainers_text(gainers: list[Gainer]) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = [
-        "STOCK MONITOR -- Top Gainers",
+        "STOCK MONITOR -- Top Gainers with Analysis",
         now,
         "",
     ]
@@ -412,41 +570,82 @@ def format_gainers_text(gainers: list[Gainer]) -> str:
     if not gainers:
         lines.append("No significant gainers found at this time.")
     else:
-        lines.append(f"TOP {len(gainers)} GAINERS TODAY")
-        lines.append("")
-        lines.append(
-            f"  {'#':<3} {'Ticker':<7} {'Price':>9} {'Change':>8} "
-            f"{'Volume':>8} {'Vol.Ratio':>9} {'Mkt Cap':>8} {'Sector'}"
-        )
-        lines.append("  " + "-" * 80)
-
         for i, g in enumerate(gainers, 1):
-            vol_ratio_str = f"{g.volume_ratio:>8.1f}x" if g.volume_ratio > 0 else "     N/A"
+            a = g.analysis
+            name = g.company if g.company and g.company != g.ticker else ""
+
+            lines.append("=" * 72)
+            header = f"  #{i}  {g.ticker}"
+            if name:
+                header += f"  --  {name}"
+            if g.sector:
+                header += f"  [{g.sector}]"
+            lines.append(header)
+            lines.append("-" * 72)
+
+            vol_ratio_str = f"{g.volume_ratio:.1f}x avg" if g.volume_ratio > 0 else "N/A"
             lines.append(
-                f"  {i:<3} {g.ticker:<7} ${g.price:>8.2f} {g.change_pct:>+7.2f}% "
-                f"{_format_volume(g.volume)} {vol_ratio_str} "
-                f"{_format_market_cap(g.market_cap)} {g.sector}"
-            )
-            if g.company and g.company != g.ticker:
-                lines.append(f"      {g.company}")
-
-        lines.append("")
-
-        high_vol = [g for g in gainers if g.volume_ratio >= 2.0]
-        if high_vol:
-            lines.append(
-                f"  Volume alerts: {len(high_vol)} gainer(s) trading at 2x+ avg volume"
+                f"  Price: ${g.price:.2f}  ({g.change_pct:+.2f}% today)"
+                f"    Volume: {_format_volume(g.volume).strip()} ({vol_ratio_str})"
+                f"    Mkt Cap:{_format_market_cap(g.market_cap)}"
             )
 
-        large_cap = [g for g in gainers if g.market_cap >= 10e9]
-        if large_cap:
-            tickers = ", ".join(g.ticker for g in large_cap[:5])
-            lines.append(f"  Large cap movers: {tickers}")
+            if a and not a.error:
+                lines.append("")
+                lines.append(
+                    f"  Signal: {_signal_icon(a.signal)} {a.signal}"
+                    f"    Score: {a.score:+d}/100"
+                    f"    Confidence: {a.confidence:.0%}"
+                )
+                lines.append(
+                    f"  Predicted return (5d): {a.predicted_return_pct:+.2f}%"
+                    f"    Probabilities: UP={a.prob_up:.0%} FLAT={a.prob_flat:.0%} DOWN={a.prob_down:.0%}"
+                )
 
-        lines.append("")
+                lines.append("")
+                if a.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
+                    lines.append(f"  >> BUY at ${g.price:.2f}")
+                    if a.stop_loss > 0:
+                        sl_pct = abs(a.stop_loss - g.price) / g.price * 100
+                        lines.append(f"  >> Stop loss: ${a.stop_loss:.2f} ({sl_pct:.1f}% below entry)")
+                    if a.resistance > 0:
+                        target_pct = (a.resistance - g.price) / g.price * 100
+                        lines.append(f"  >> Target (resistance): ${a.resistance:.2f} ({target_pct:+.1f}%)")
+                elif a.signal in ("STRONG SELL", "SELL", "LEAN SELL"):
+                    lines.append(f"  >> AVOID / SELL at ${g.price:.2f}")
+                    if a.stop_loss > 0:
+                        sl_pct = abs(a.stop_loss - g.price) / g.price * 100
+                        lines.append(f"  >> Stop loss: ${a.stop_loss:.2f} ({sl_pct:.1f}% above entry)")
+                    if a.support > 0:
+                        target_pct = (a.support - g.price) / g.price * 100
+                        lines.append(f"  >> Target (support): ${a.support:.2f} ({target_pct:+.1f}%)")
+                else:
+                    lines.append(f"  >> HOLD / WAIT -- no clear edge")
 
-    lines.append("-" * 72)
-    lines.append("Engine: Top Gainers Detector | Sources: Yahoo Finance, Finviz")
+                lines.append("")
+                lines.append(
+                    f"  Support: ${a.support:.2f}    Resistance: ${a.resistance:.2f}"
+                )
+                lines.append(
+                    f"  SMA(20): ${a.sma_20:.2f}    SMA(50): ${a.sma_50:.2f}    RSI: {a.rsi:.0f}"
+                )
+
+                if a.risks:
+                    lines.append("")
+                    lines.append("  Risks:")
+                    for risk in a.risks:
+                        lines.append(f"    ! {risk}")
+
+            elif a and a.error:
+                lines.append(f"  Analysis: unavailable ({a.error})")
+            else:
+                lines.append("  Analysis: not run")
+
+            lines.append("")
+
+    lines.append("=" * 72)
+    lines.append("Engine: Top Gainers Detector + ML Ensemble")
+    lines.append("Sources: Yahoo Finance, Finviz | Model: GBM + LSTM")
     lines.append("Not financial advice. Do your own research.")
     return "\n".join(lines)
 

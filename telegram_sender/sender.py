@@ -5,9 +5,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
+    if TYPE_CHECKING:
     from stock_monitor.analyzer import StockAnalysis
-    from stock_monitor.gainers import Gainer
+    from stock_monitor.gainers import Gainer, GainerAnalysis
     from stock_monitor.news import NewsMover
 
 log = logging.getLogger(__name__)
@@ -194,7 +194,21 @@ def sendGainersMessage(gainers: list[Gainer]) -> bool:
             name = g.company if len(g.company) <= 40 else g.company[:37] + "..."
             lines.append(f"   <i>{name}</i>")
 
-    lines.append("")
+        a = g.analysis
+        if a and not a.error:
+            sig_icon = _SIGNAL_ICONS.get(a.signal, "⚪")
+            lines.append(f"   {sig_icon} <b>{a.signal}</b> ({a.confidence:.0%} conf)")
+            if a.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
+                entry = f"Entry: ${g.price:.2f}"
+                sl = f"  SL: ${a.stop_loss:.2f}" if a.stop_loss > 0 else ""
+                tp = f"  TP: ${a.resistance:.2f}" if a.resistance > 0 else ""
+                lines.append(f"   💰 {entry}{sl}{tp}")
+            elif a.signal in ("STRONG SELL", "SELL", "LEAN SELL"):
+                lines.append(f"   ⚠️ AVOID — downside risk {a.prob_down:.0%}")
+            if a.risks:
+                top_risk = a.risks[0]
+                lines.append(f"   ⚡ {top_risk}")
+        lines.append("")
 
     high_vol = [g for g in gainers if g.volume_ratio >= 2.0]
     if high_vol:
