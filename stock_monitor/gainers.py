@@ -16,7 +16,38 @@ _TIMEOUT = 15
 
 
 @dataclass
-class GainerAnalysis:
+class IntradayResult:
+    signal: str = "HOLD"
+    stop_loss: float = 0.0
+    support: float = 0.0
+    resistance: float = 0.0
+    rsi: float = 0.0
+    vwap: float = 0.0
+    ema_9: float = 0.0
+    ema_21: float = 0.0
+    atr: float = 0.0
+    trend: str = ""
+    reasons: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "label": "intraday (1h)",
+            "signal": self.signal,
+            "stop_loss": self.stop_loss,
+            "support": self.support,
+            "resistance": self.resistance,
+            "rsi": self.rsi,
+            "vwap": self.vwap,
+            "ema_9": self.ema_9,
+            "ema_21": self.ema_21,
+            "atr": self.atr,
+            "trend": self.trend,
+            "reasons": self.reasons,
+        }
+
+
+@dataclass
+class DailyResult:
     signal: str = "HOLD"
     score: int = 0
     predicted_return_pct: float = 0.0
@@ -31,11 +62,10 @@ class GainerAnalysis:
     prob_down: float = 0.0
     prob_flat: float = 0.0
     reasons: list[str] = field(default_factory=list)
-    risks: list[str] = field(default_factory=list)
-    error: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
+            "label": "daily (1d)",
             "signal": self.signal,
             "score": self.score,
             "predicted_return_pct": self.predicted_return_pct,
@@ -50,9 +80,23 @@ class GainerAnalysis:
             "prob_down": self.prob_down,
             "prob_flat": self.prob_flat,
             "reasons": self.reasons,
-            "risks": self.risks,
-            "error": self.error,
         }
+
+
+@dataclass
+class GainerAnalysis:
+    intraday: Optional[IntradayResult] = None
+    daily: Optional[DailyResult] = None
+    risks: list[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        d: dict = {"risks": self.risks, "error": self.error}
+        if self.intraday:
+            d["intraday"] = self.intraday.to_dict()
+        if self.daily:
+            d["daily"] = self.daily.to_dict()
+        return d
 
 
 @dataclass
@@ -423,7 +467,205 @@ def scan_gainers(
     return result
 
 
-def _assess_risks(g: Gainer, a: GainerAnalysis) -> list[str]:
+def _compute_rsi(closes: list[float], period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    recent = deltas[-period:]
+    gains = [d for d in recent if d > 0]
+    losses = [-d for d in recent if d < 0]
+    avg_gain = sum(gains) / period if gains else 0
+    avg_loss = sum(losses) / period if losses else 0
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 1)
+
+
+def _compute_ema(values: list[float], period: int) -> float:
+    if not values:
+        return 0.0
+    if len(values) < period:
+        return sum(values) / len(values)
+    k = 2.0 / (period + 1)
+    ema = sum(values[:period]) / period
+    for v in values[period:]:
+        ema = v * k + ema * (1 - k)
+    return round(ema, 2)
+
+
+def _intraday_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
+    if len(highs) < 2:
+        return 0.0
+    trs = []
+    for i in range(1, len(highs)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+    if len(trs) < period:
+        return sum(trs) / len(trs) if trs else 0.0
+    return sum(trs[-period:]) / period
+
+
+def _analyze_intraday(ticker: str, current_price: float) -> Optional[IntradayResult]:
+    data = fetch_chart(ticker, range_="5d", interval="1h", timeout=12)
+    if data is None:
+        return None
+    try:
+        result = data["chart"]["result"][0]
+        quotes = result.get("indicators", {}).get("quote", [{}])[0]
+        closes_raw = quotes.get("close", [])
+        highs_raw = quotes.get("high", [])
+        lows_raw = quotes.get("low", [])
+        volumes_raw = quotes.get("volume", [])
+
+        closes = [float(c) for c in closes_raw if c is not None]
+        highs = [float(h) for h in highs_raw if h is not None]
+        lows = [float(lo) for lo in lows_raw if lo is not None]
+        volumes = [int(v) for v in volumes_raw if v is not None]
+
+        if len(closes) < 10:
+            return None
+
+        rsi = _compute_rsi(closes)
+        ema_9 = _compute_ema(closes, 9)
+        ema_21 = _compute_ema(closes, 21)
+        atr = _intraday_atr(highs, lows, closes)
+
+        recent_lows = lows[-20:] if len(lows) >= 20 else lows
+        recent_highs = highs[-20:] if len(highs) >= 20 else highs
+        support = round(min(recent_lows), 2)
+        resistance = round(max(recent_highs), 2)
+
+        vwap = 0.0
+        if volumes and len(closes) == len(volumes):
+            total_vol = sum(volumes[-30:])
+            if total_vol > 0:
+                typical_prices = [
+                    (highs[i] + lows[i] + closes[i]) / 3
+                    for i in range(max(0, len(closes) - 30), len(closes))
+                ]
+                vp_sum = sum(
+                    tp * v
+                    for tp, v in zip(typical_prices, volumes[-30:])
+                )
+                vwap = round(vp_sum / total_vol, 2)
+
+        trend = ""
+        reasons: list[str] = []
+        if ema_9 > ema_21:
+            trend = "BULLISH"
+            reasons.append(f"EMA(9) ${ema_9:.2f} above EMA(21) ${ema_21:.2f}")
+        elif ema_9 < ema_21:
+            trend = "BEARISH"
+            reasons.append(f"EMA(9) ${ema_9:.2f} below EMA(21) ${ema_21:.2f}")
+        else:
+            trend = "NEUTRAL"
+
+        if vwap > 0 and current_price > vwap:
+            reasons.append(f"Price above VWAP ${vwap:.2f} -- intraday bullish")
+        elif vwap > 0:
+            reasons.append(f"Price below VWAP ${vwap:.2f} -- intraday bearish")
+
+        if rsi > 80:
+            reasons.append(f"1h RSI {rsi:.0f} -- severely overbought, pullback risk")
+        elif rsi > 70:
+            reasons.append(f"1h RSI {rsi:.0f} -- overbought territory")
+        elif rsi < 30:
+            reasons.append(f"1h RSI {rsi:.0f} -- oversold, possible bounce")
+
+        signal = "HOLD"
+        if trend == "BULLISH" and rsi < 75 and (vwap == 0 or current_price >= vwap):
+            if rsi < 50:
+                signal = "STRONG BUY"
+            else:
+                signal = "BUY"
+        elif trend == "BULLISH" and rsi >= 75:
+            signal = "HOLD"
+            reasons.append("Bullish trend but overbought -- wait for pullback")
+        elif trend == "BEARISH" and rsi > 25:
+            if rsi > 50:
+                signal = "SELL"
+            else:
+                signal = "LEAN SELL"
+        elif trend == "BEARISH" and rsi <= 25:
+            signal = "HOLD"
+            reasons.append("Bearish but oversold -- bounce possible")
+        elif trend == "BULLISH":
+            signal = "LEAN BUY"
+
+        stop_loss = 0.0
+        if signal in ("STRONG BUY", "BUY", "LEAN BUY") and atr > 0:
+            stop_loss = round(max(current_price - atr * 1.0, support * 0.995), 2)
+        elif signal in ("SELL", "LEAN SELL") and atr > 0:
+            stop_loss = round(min(current_price + atr * 1.0, resistance * 1.005), 2)
+
+        return IntradayResult(
+            signal=signal,
+            stop_loss=stop_loss,
+            support=support,
+            resistance=resistance,
+            rsi=rsi,
+            vwap=vwap,
+            ema_9=ema_9,
+            ema_21=ema_21,
+            atr=round(atr, 2),
+            trend=trend,
+            reasons=reasons,
+        )
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        log.warning("Intraday analysis parse failed for %s: %s", ticker, exc)
+        return None
+
+
+def _analyze_daily(
+    ticker: str,
+    market_df,
+    vix_df,
+    use_lstm: bool,
+) -> Optional[DailyResult]:
+    from .analyzer import analyze
+    from .config import TIMEFRAME_1D
+
+    try:
+        result = analyze(
+            ticker,
+            force_retrain=False,
+            timeframe=TIMEFRAME_1D,
+            market="US",
+            currency="$",
+            market_df=market_df,
+            vix_df=vix_df,
+            use_lstm=use_lstm,
+        )
+        if result.error:
+            return None
+
+        return DailyResult(
+            signal=result.signal.value,
+            score=result.score,
+            predicted_return_pct=result.predicted_return_pct,
+            confidence=result.confidence,
+            stop_loss=result.stop_loss,
+            support=result.support,
+            resistance=result.resistance,
+            sma_20=result.sma_20,
+            sma_50=result.sma_50,
+            rsi=result.rsi,
+            prob_up=result.prob_up,
+            prob_down=result.prob_down,
+            prob_flat=result.prob_flat,
+            reasons=result.reasons,
+        )
+    except Exception as exc:
+        log.warning("Daily ML analysis failed for %s: %s", ticker, exc)
+        return None
+
+
+def _assess_risks(g: Gainer, ga: GainerAnalysis) -> list[str]:
     risks = []
 
     if g.change_pct > 20:
@@ -431,10 +673,17 @@ def _assess_risks(g: Gainer, a: GainerAnalysis) -> list[str]:
     elif g.change_pct > 10:
         risks.append(f"Sharp rally (+{g.change_pct:.0f}%) -- pullback likely")
 
-    if a.rsi > 80:
-        risks.append(f"RSI at {a.rsi:.0f} -- severely overbought")
-    elif a.rsi > 70:
-        risks.append(f"RSI at {a.rsi:.0f} -- overbought territory")
+    intra = ga.intraday
+    daily = ga.daily
+
+    intra_rsi = intra.rsi if intra else 0
+    daily_rsi = daily.rsi if daily else 0
+    peak_rsi = max(intra_rsi, daily_rsi)
+
+    if peak_rsi > 80:
+        risks.append(f"RSI at {peak_rsi:.0f} -- severely overbought")
+    elif peak_rsi > 70:
+        risks.append(f"RSI at {peak_rsi:.0f} -- overbought territory")
 
     if g.volume_ratio < 1.0 and g.volume_ratio > 0:
         risks.append("Below-average volume -- weak conviction behind move")
@@ -444,15 +693,24 @@ def _assess_risks(g: Gainer, a: GainerAnalysis) -> list[str]:
     elif g.market_cap > 0 and g.market_cap < 500e6:
         risks.append("Small-cap -- higher volatility than large caps")
 
-    if a.prob_down > 0.35:
-        risks.append(f"Model sees {a.prob_down:.0%} chance of decline")
+    if daily:
+        if daily.prob_down > 0.35:
+            risks.append(f"Model sees {daily.prob_down:.0%} chance of decline (daily)")
+        if daily.confidence < 0.4 and daily.confidence > 0:
+            risks.append(f"Low ML confidence ({daily.confidence:.0%})")
+        if g.price > 0 and daily.sma_50 > 0 and g.price > daily.sma_50 * 1.15:
+            pct_above = (g.price / daily.sma_50 - 1) * 100
+            risks.append(f"Extended {pct_above:.0f}% above SMA(50) -- stretched")
 
-    if a.confidence < 0.4 and a.confidence > 0:
-        risks.append(f"Low model confidence ({a.confidence:.0%})")
-
-    if g.price > 0 and a.sma_50 > 0 and g.price > a.sma_50 * 1.15:
-        pct_above = (g.price / a.sma_50 - 1) * 100
-        risks.append(f"Extended {pct_above:.0f}% above SMA(50) -- stretched")
+    if intra and daily:
+        intra_bull = intra.signal in ("STRONG BUY", "BUY", "LEAN BUY")
+        daily_bull = daily.signal in ("STRONG BUY", "BUY", "LEAN BUY")
+        intra_bear = intra.signal in ("SELL", "LEAN SELL", "STRONG SELL")
+        daily_bear = daily.signal in ("SELL", "LEAN SELL", "STRONG SELL")
+        if intra_bull and daily_bear:
+            risks.append("Timeframe conflict: intraday bullish but daily bearish")
+        elif intra_bear and daily_bull:
+            risks.append("Timeframe conflict: intraday bearish but daily bullish")
 
     if not risks:
         risks.append("No major risk flags detected")
@@ -465,9 +723,7 @@ def analyze_gainers(
     use_lstm: bool = True,
     max_workers: int = 4,
 ) -> None:
-    from .analyzer import analyze
     from .market_data import get_market_context
-    from .config import TIMEFRAME_5D
 
     market_df = None
     vix_df = None
@@ -478,34 +734,10 @@ def analyze_gainers(
 
     def _analyze_one(g: Gainer) -> None:
         try:
-            result = analyze(
-                g.ticker,
-                force_retrain=False,
-                timeframe=TIMEFRAME_5D,
-                market="US",
-                currency="$",
-                market_df=market_df,
-                vix_df=vix_df,
-                use_lstm=use_lstm,
-            )
+            intra = _analyze_intraday(g.ticker, g.price)
+            daily = _analyze_daily(g.ticker, market_df, vix_df, use_lstm)
 
-            ga = GainerAnalysis(
-                signal=result.signal.value,
-                score=result.score,
-                predicted_return_pct=result.predicted_return_pct,
-                confidence=result.confidence,
-                stop_loss=result.stop_loss,
-                support=result.support,
-                resistance=result.resistance,
-                sma_20=result.sma_20,
-                sma_50=result.sma_50,
-                rsi=result.rsi,
-                prob_up=result.prob_up,
-                prob_down=result.prob_down,
-                prob_flat=result.prob_flat,
-                reasons=result.reasons,
-                error=result.error,
-            )
+            ga = GainerAnalysis(intraday=intra, daily=daily)
             ga.risks = _assess_risks(g, ga)
             g.analysis = ga
         except Exception as exc:
@@ -514,7 +746,7 @@ def analyze_gainers(
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    log.info("Running ML analysis on %d gainers with %d workers...", len(gainers), max_workers)
+    log.info("Running dual-timeframe analysis on %d gainers with %d workers...", len(gainers), max_workers)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_analyze_one, g): g for g in gainers}
         done = 0
@@ -559,10 +791,74 @@ def _signal_icon(signal: str) -> str:
     return icons.get(signal, "[ ? ]")
 
 
+def _fmt_intraday_block(lines: list[str], price: float, intra: IntradayResult) -> None:
+    lines.append(f"  INTRADAY (1h bars)    Trend: {intra.trend}    Signal: {_signal_icon(intra.signal)} {intra.signal}")
+    parts = []
+    if intra.vwap > 0:
+        parts.append(f"VWAP ${intra.vwap:.2f}")
+    parts.append(f"EMA(9) ${intra.ema_9:.2f}")
+    parts.append(f"EMA(21) ${intra.ema_21:.2f}")
+    parts.append(f"RSI {intra.rsi:.0f}")
+    if intra.atr > 0:
+        parts.append(f"ATR ${intra.atr:.2f}")
+    lines.append(f"    {' | '.join(parts)}")
+    lines.append(f"    Support: ${intra.support:.2f}    Resistance: ${intra.resistance:.2f}")
+
+    if intra.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
+        lines.append(f"    >> BUY now at ${price:.2f}")
+        if intra.stop_loss > 0:
+            sl_pct = abs(intra.stop_loss - price) / price * 100
+            lines.append(f"    >> Stop loss: ${intra.stop_loss:.2f} ({sl_pct:.1f}% below)")
+        if intra.resistance > 0 and intra.resistance > price:
+            tp_pct = (intra.resistance - price) / price * 100
+            lines.append(f"    >> Intraday target: ${intra.resistance:.2f} ({tp_pct:+.1f}%)")
+    elif intra.signal in ("SELL", "LEAN SELL", "STRONG SELL"):
+        lines.append(f"    >> AVOID -- intraday trend bearish")
+        if intra.stop_loss > 0:
+            sl_pct = abs(intra.stop_loss - price) / price * 100
+            lines.append(f"    >> Stop loss (if short): ${intra.stop_loss:.2f} ({sl_pct:.1f}% above)")
+    else:
+        lines.append(f"    >> WAIT -- no clear intraday edge")
+
+    for r in intra.reasons:
+        lines.append(f"    - {r}")
+
+
+def _fmt_daily_block(lines: list[str], price: float, daily: DailyResult) -> None:
+    lines.append(
+        f"  DAILY (1d ML prediction)    Signal: {_signal_icon(daily.signal)} {daily.signal}"
+        f"    Score: {daily.score:+d}/100    Confidence: {daily.confidence:.0%}"
+    )
+    lines.append(
+        f"    Predicted return: {daily.predicted_return_pct:+.2f}%"
+        f"    Probabilities: UP={daily.prob_up:.0%} FLAT={daily.prob_flat:.0%} DOWN={daily.prob_down:.0%}"
+    )
+    lines.append(
+        f"    SMA(20): ${daily.sma_20:.2f}    SMA(50): ${daily.sma_50:.2f}    RSI: {daily.rsi:.0f}"
+    )
+    lines.append(f"    Support: ${daily.support:.2f}    Resistance: ${daily.resistance:.2f}")
+
+    if daily.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
+        lines.append(f"    >> BUY for daily hold at ${price:.2f}")
+        if daily.stop_loss > 0:
+            sl_pct = abs(daily.stop_loss - price) / price * 100
+            lines.append(f"    >> Stop loss: ${daily.stop_loss:.2f} ({sl_pct:.1f}% below)")
+        if daily.resistance > 0 and daily.resistance > price:
+            tp_pct = (daily.resistance - price) / price * 100
+            lines.append(f"    >> Daily target: ${daily.resistance:.2f} ({tp_pct:+.1f}%)")
+    elif daily.signal in ("SELL", "LEAN SELL", "STRONG SELL"):
+        lines.append(f"    >> AVOID -- daily model bearish")
+        if daily.stop_loss > 0:
+            sl_pct = abs(daily.stop_loss - price) / price * 100
+            lines.append(f"    >> Stop loss (if short): ${daily.stop_loss:.2f} ({sl_pct:.1f}% above)")
+    else:
+        lines.append(f"    >> HOLD -- daily model sees no clear edge")
+
+
 def format_gainers_text(gainers: list[Gainer]) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = [
-        "STOCK MONITOR -- Top Gainers with Analysis",
+        "STOCK MONITOR -- Top Gainers (Intraday + Daily)",
         now,
         "",
     ]
@@ -591,48 +887,20 @@ def format_gainers_text(gainers: list[Gainer]) -> str:
             )
 
             if a and not a.error:
-                lines.append("")
-                lines.append(
-                    f"  Signal: {_signal_icon(a.signal)} {a.signal}"
-                    f"    Score: {a.score:+d}/100"
-                    f"    Confidence: {a.confidence:.0%}"
-                )
-                lines.append(
-                    f"  Predicted return (5d): {a.predicted_return_pct:+.2f}%"
-                    f"    Probabilities: UP={a.prob_up:.0%} FLAT={a.prob_flat:.0%} DOWN={a.prob_down:.0%}"
-                )
+                if a.intraday:
+                    lines.append("")
+                    _fmt_intraday_block(lines, g.price, a.intraday)
 
-                lines.append("")
-                if a.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
-                    lines.append(f"  >> BUY at ${g.price:.2f}")
-                    if a.stop_loss > 0:
-                        sl_pct = abs(a.stop_loss - g.price) / g.price * 100
-                        lines.append(f"  >> Stop loss: ${a.stop_loss:.2f} ({sl_pct:.1f}% below entry)")
-                    if a.resistance > 0:
-                        target_pct = (a.resistance - g.price) / g.price * 100
-                        lines.append(f"  >> Target (resistance): ${a.resistance:.2f} ({target_pct:+.1f}%)")
-                elif a.signal in ("STRONG SELL", "SELL", "LEAN SELL"):
-                    lines.append(f"  >> AVOID / SELL at ${g.price:.2f}")
-                    if a.stop_loss > 0:
-                        sl_pct = abs(a.stop_loss - g.price) / g.price * 100
-                        lines.append(f"  >> Stop loss: ${a.stop_loss:.2f} ({sl_pct:.1f}% above entry)")
-                    if a.support > 0:
-                        target_pct = (a.support - g.price) / g.price * 100
-                        lines.append(f"  >> Target (support): ${a.support:.2f} ({target_pct:+.1f}%)")
-                else:
-                    lines.append(f"  >> HOLD / WAIT -- no clear edge")
+                if a.daily:
+                    lines.append("")
+                    _fmt_daily_block(lines, g.price, a.daily)
 
-                lines.append("")
-                lines.append(
-                    f"  Support: ${a.support:.2f}    Resistance: ${a.resistance:.2f}"
-                )
-                lines.append(
-                    f"  SMA(20): ${a.sma_20:.2f}    SMA(50): ${a.sma_50:.2f}    RSI: {a.rsi:.0f}"
-                )
+                if not a.intraday and not a.daily:
+                    lines.append("  Analysis: both timeframes unavailable")
 
                 if a.risks:
                     lines.append("")
-                    lines.append("  Risks:")
+                    lines.append("  RISKS:")
                     for risk in a.risks:
                         lines.append(f"    ! {risk}")
 
@@ -645,7 +913,8 @@ def format_gainers_text(gainers: list[Gainer]) -> str:
 
     lines.append("=" * 72)
     lines.append("Engine: Top Gainers Detector + ML Ensemble")
-    lines.append("Sources: Yahoo Finance, Finviz | Model: GBM + LSTM")
+    lines.append("Timeframes: Intraday (1h technicals) + Daily (GBM + LSTM)")
+    lines.append("Sources: Yahoo Finance, Finviz")
     lines.append("Not financial advice. Do your own research.")
     return "\n".join(lines)
 

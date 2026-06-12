@@ -173,7 +173,7 @@ def sendGainersMessage(gainers: list[Gainer]) -> bool:
         text = "📈 <b>Top Gainers</b>\n\nNo significant gainers found at this time."
         return _send(token, chat_id, text)
 
-    lines = ["📈 <b>Top Gainers Today</b>\n"]
+    lines = ["📈 <b>Top Gainers Today (Intraday + Daily)</b>\n"]
 
     for i, g in enumerate(gainers[:15], 1):
         vol_str = ""
@@ -196,18 +196,30 @@ def sendGainersMessage(gainers: list[Gainer]) -> bool:
 
         a = g.analysis
         if a and not a.error:
-            sig_icon = _SIGNAL_ICONS.get(a.signal, "⚪")
-            lines.append(f"   {sig_icon} <b>{a.signal}</b> ({a.confidence:.0%} conf)")
-            if a.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
-                entry = f"Entry: ${g.price:.2f}"
-                sl = f"  SL: ${a.stop_loss:.2f}" if a.stop_loss > 0 else ""
-                tp = f"  TP: ${a.resistance:.2f}" if a.resistance > 0 else ""
-                lines.append(f"   💰 {entry}{sl}{tp}")
-            elif a.signal in ("STRONG SELL", "SELL", "LEAN SELL"):
-                lines.append(f"   ⚠️ AVOID — downside risk {a.prob_down:.0%}")
+            if a.intraday:
+                intra = a.intraday
+                sig_icon = _SIGNAL_ICONS.get(intra.signal, "⚪")
+                lines.append(f"   ⏱ <b>1H:</b> {sig_icon} {intra.signal} | {intra.trend}")
+                if intra.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
+                    sl = f"  SL: ${intra.stop_loss:.2f}" if intra.stop_loss > 0 else ""
+                    tp = f"  TP: ${intra.resistance:.2f}" if intra.resistance > 0 and intra.resistance > g.price else ""
+                    lines.append(f"   💰 Entry: ${g.price:.2f}{sl}{tp}")
+                elif intra.signal in ("SELL", "LEAN SELL", "STRONG SELL"):
+                    lines.append(f"   ⚠️ Intraday bearish")
+
+            if a.daily:
+                daily = a.daily
+                sig_icon = _SIGNAL_ICONS.get(daily.signal, "⚪")
+                lines.append(f"   📅 <b>1D:</b> {sig_icon} {daily.signal} ({daily.confidence:.0%} conf)")
+                if daily.signal in ("STRONG BUY", "BUY", "LEAN BUY"):
+                    sl = f"  SL: ${daily.stop_loss:.2f}" if daily.stop_loss > 0 else ""
+                    tp = f"  TP: ${daily.resistance:.2f}" if daily.resistance > 0 and daily.resistance > g.price else ""
+                    lines.append(f"   💰 Daily: ${g.price:.2f}{sl}{tp}")
+                elif daily.signal in ("SELL", "LEAN SELL", "STRONG SELL"):
+                    lines.append(f"   ⚠️ Daily bearish — {daily.prob_down:.0%} downside")
+
             if a.risks:
-                top_risk = a.risks[0]
-                lines.append(f"   ⚡ {top_risk}")
+                lines.append(f"   ⚡ {a.risks[0]}")
         lines.append("")
 
     high_vol = [g for g in gainers if g.volume_ratio >= 2.0]

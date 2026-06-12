@@ -18,6 +18,7 @@ class Signal(Enum):
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPORTS_DIR = BASE_DIR / "reports"
 MODELS_DIR = BASE_DIR / "models"
+MODELS_INTRADAY_DIR = BASE_DIR / "models_intraday"
 MODELS_DAILY_DIR = BASE_DIR / "models_daily"
 MODELS_MONTHLY_DIR = BASE_DIR / "models_monthly"
 MODELS_SWING_DIR = BASE_DIR / "models_swing"
@@ -46,6 +47,16 @@ SIGNAL_THRESHOLDS: dict[Signal, float] = {
     Signal.LEAN_SELL: -0.005,
     Signal.SELL: -0.02,
     Signal.STRONG_SELL: -0.04,
+}
+
+INTRADAY_SIGNAL_THRESHOLDS: dict[Signal, float] = {
+    Signal.STRONG_BUY: 0.008,
+    Signal.BUY: 0.004,
+    Signal.LEAN_BUY: 0.001,
+    Signal.HOLD: 0.0,
+    Signal.LEAN_SELL: -0.001,
+    Signal.SELL: -0.004,
+    Signal.STRONG_SELL: -0.008,
 }
 
 DAILY_SIGNAL_THRESHOLDS: dict[Signal, float] = {
@@ -112,6 +123,17 @@ class TimeframeConfig:
     model_max_age_days: int = MODEL_MAX_AGE_DAYS
     atr_stop_multiplier: float = 2.0
 
+
+TIMEFRAME_INTRADAY = TimeframeConfig(
+    horizon=1,
+    models_dir=MODELS_INTRADAY_DIR,
+    signal_thresholds=INTRADAY_SIGNAL_THRESHOLDS,
+    sequence_length=30,
+    label="intraday (1h bars)",
+    live_price=True,
+    model_max_age_days=1,
+    atr_stop_multiplier=1.0,
+)
 
 TIMEFRAME_5D = TimeframeConfig(
     horizon=PREDICTION_HORIZON,
