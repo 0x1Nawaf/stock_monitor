@@ -246,14 +246,10 @@ def analyze(
         prev_close = float(df["Close"].iloc[-2])
         change_pct = round((price - prev_close) / prev_close * 100, 2)
 
-        if timeframe.live_price:
-            live = fetch_live_price(ticker)
-            if live is not None:
-                price = live.price
-                change_pct = live.change_pct
-                reasons.append(f"Live price as of {live.timestamp}")
-            else:
-                reasons.append("Live price unavailable, using last daily close")
+        live = fetch_live_price(ticker)
+        if live is not None:
+            price = live.price
+            change_pct = live.change_pct
 
         if signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY):
             reasons.insert(0, f"Buy at {currency}{price}")

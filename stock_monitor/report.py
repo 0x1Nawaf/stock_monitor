@@ -129,36 +129,36 @@ def format_text(
             )
         lines.append("")
 
-    groups: dict[str, list[StockAnalysis]] = {
-        "STRONG BUY": [],
-        "BUY": [],
-        "LEAN BUY": [],
-        "HOLD": [],
-        "LEAN SELL": [],
-        "SELL": [],
-        "STRONG SELL": [],
-    }
-    for r in valid:
-        groups[r.signal.value].append(r)
+    actionable = [r for r in valid if r.signal.value in ("STRONG BUY", "BUY")]
+    other = [r for r in valid if r.signal.value not in ("STRONG BUY", "BUY")]
 
-    for label, group in groups.items():
-        if not group:
-            continue
-        lines.append(label)
-        for r in group:
-            lines.append(
-                f"  {r.ticker:<10}  {r.currency}{r.price:>10.2f}  {r.change_pct:>+7.2f}%  "
-                f"Score: {r.score:>+4d}  "
-                f"P(UP)={r.prob_up:.0%} P(DN)={r.prob_down:.0%}  "
-                f"Conf: {r.confidence:.0%}"
-            )
+    if actionable:
+        for label in ("STRONG BUY", "BUY"):
+            group = [r for r in actionable if r.signal.value == label]
+            if not group:
+                continue
+            lines.append(label)
+            for r in group:
+                lines.append(
+                    f"  {r.ticker:<10}  {r.currency}{r.price:>10.2f}  {r.change_pct:>+7.2f}%  "
+                    f"Score: {r.score:>+4d}  "
+                    f"P(UP)={r.prob_up:.0%} P(DN)={r.prob_down:.0%}  "
+                    f"Conf: {r.confidence:.0%}"
+                )
+            lines.append("")
+    else:
+        lines.append("No BUY signals at this time.")
+        lines.append("")
+
+    if other:
+        lines.append(f"({len(other)} other ticker(s) not showing actionable signals)")
         lines.append("")
 
     lines.append("-" * 72)
     lines.append("DETAILS")
     lines.append("-" * 72)
 
-    for r in valid:
+    for r in actionable:
         lines.append("")
         lines.append(
             f"{r.signal.value}  {r.ticker}  {r.currency}{r.price}  ({r.change_pct:+.2f}%)  "

@@ -128,6 +128,9 @@ def sendMessage(res: StockAnalysis) -> bool:
     if res.error:
         return False
 
+    if res.signal.value not in ("STRONG BUY", "BUY"):
+        return False
+
     signal_icon = _SIGNAL_ICONS.get(res.signal.value, "⚪")
     market_flag = "🇸🇦" if res.market == "SA" else "🇺🇸"
     tf_labels = {"1d": "1 day", "5d": "5 days", "swing": "swing (10 days)", "monthly": "1 month (21 days)"}
