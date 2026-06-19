@@ -147,16 +147,31 @@ def _current_indicators(
     return sma20, sma50, rsi_val
 
 
-def _estimated_return_from_probs(probs: np.ndarray, horizon: int) -> float:
-    up_thresh, down_thresh = get_thresholds(horizon)
-    mid_up = up_thresh * 1.5
-    mid_down = down_thresh * 1.5
-    expected = (
-        probs[TargetClass.UP] * mid_up
-        + probs[TargetClass.FLAT] * 0.0
-        + probs[TargetClass.DOWN] * mid_down
+_HORIZON_EXPECTED_MOVE = {
+    1: (0.025, -0.025),
+    5: (0.07, -0.07),
+    10: (0.12, -0.12),
+    21: (0.18, -0.18),
+}
+
+
+def _estimated_return_from_probs(
+    probs: np.ndarray, horizon: int, confidence: float = 0.5
+) -> float:
+    """Estimate the predicted return based on probability distribution.
+
+    Uses realistic expected moves (not just classification thresholds).
+    The threshold is the MINIMUM to qualify as UP — actual moves are much larger.
+    """
+    expected_up, expected_down = _HORIZON_EXPECTED_MOVE.get(
+        horizon, (0.005 * horizon, -0.005 * horizon)
     )
-    return float(expected)
+
+    directional_strength = float(probs[TargetClass.UP] - probs[TargetClass.DOWN])
+
+    predicted = directional_strength * max(abs(expected_up), abs(expected_down)) * confidence
+
+    return float(predicted)
 
 
 def analyze(
@@ -287,7 +302,9 @@ def analyze(
         elif rsi < 30:
             reasons.append(f"RSI at {rsi} -- oversold territory")
 
-        predicted_return = _estimated_return_from_probs(ensemble.probabilities, horizon)
+        predicted_return = _estimated_return_from_probs(
+            ensemble.probabilities, horizon, ensemble.confidence
+        )
 
         model_type = "ensemble" if lstm_pred is not None else "gbm"
 
