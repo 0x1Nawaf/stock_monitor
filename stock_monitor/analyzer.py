@@ -41,6 +41,7 @@ class StockAnalysis:
     sma_50: float
     rsi: float
     stop_loss: float = 0.0
+    take_profit: float = 0.0
     timeframe: str = "5d"
     market: str = "US"
     currency: str = "$"
@@ -68,6 +69,7 @@ class StockAnalysis:
             "sma_50": self.sma_50,
             "rsi": self.rsi,
             "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
             "timeframe": self.timeframe,
             "market": self.market,
             "currency": self.currency,
@@ -134,6 +136,30 @@ def _stop_loss(
     elif signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL):
         atr_stop = price + (atr * multiplier)
         return round(min(atr_stop, resistance * 1.01), 2)
+    return 0.0
+
+
+def _take_profit(
+    price: float,
+    signal: Signal,
+    predicted_return_pct: float,
+    resistance: float,
+    support: float,
+    atr: float,
+    multiplier: float,
+) -> float:
+    if signal in (Signal.STRONG_BUY, Signal.BUY):
+        target_from_prediction = price * (1 + predicted_return_pct / 100)
+        target_from_resistance = resistance * 0.98
+        atr_target = price + (atr * multiplier * 1.5)
+        target = max(target_from_prediction, min(target_from_resistance, atr_target))
+        return round(target, 2)
+    elif signal in (Signal.STRONG_SELL, Signal.SELL):
+        target_from_prediction = price * (1 + predicted_return_pct / 100)
+        target_from_support = support * 1.02
+        atr_target = price - (atr * multiplier * 1.5)
+        target = min(target_from_prediction, max(target_from_support, atr_target))
+        return round(target, 2)
     return 0.0
 
 
@@ -280,12 +306,29 @@ def analyze(
             atr, timeframe.atr_stop_multiplier,
         )
 
+        predicted_return = _estimated_return_from_probs(
+            ensemble.probabilities, horizon, ensemble.confidence
+        )
+
+        take_profit = _take_profit(
+            price, signal, predicted_return * 100,
+            resistance, support, atr, timeframe.atr_stop_multiplier,
+        )
+
         if stop_loss > 0:
             sl_pct = abs(stop_loss - price) / price * 100
-            if signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY):
+            if signal in (Signal.STRONG_BUY, Signal.BUY):
                 reasons.insert(1, f"Stop loss at {currency}{stop_loss:.2f} ({sl_pct:.1f}% below entry)")
-            elif signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL):
+            elif signal in (Signal.STRONG_SELL, Signal.SELL):
                 reasons.insert(1, f"Stop loss at {currency}{stop_loss:.2f} ({sl_pct:.1f}% above entry)")
+
+        if take_profit > 0:
+            tp_pct = abs(take_profit - price) / price * 100
+            insert_pos = 2 if stop_loss > 0 else 1
+            if signal in (Signal.STRONG_BUY, Signal.BUY):
+                reasons.insert(insert_pos, f"Take profit at {currency}{take_profit:.2f} (+{tp_pct:.1f}% from entry)")
+            elif signal in (Signal.STRONG_SELL, Signal.SELL):
+                reasons.insert(insert_pos, f"Take profit at {currency}{take_profit:.2f} (-{tp_pct:.1f}% from entry)")
 
         if price > sma20:
             reasons.append(f"Price above SMA(20) at {sma20}")
@@ -301,10 +344,6 @@ def analyze(
             reasons.append(f"RSI at {rsi} -- overbought territory")
         elif rsi < 30:
             reasons.append(f"RSI at {rsi} -- oversold territory")
-
-        predicted_return = _estimated_return_from_probs(
-            ensemble.probabilities, horizon, ensemble.confidence
-        )
 
         model_type = "ensemble" if lstm_pred is not None else "gbm"
 
@@ -323,6 +362,7 @@ def analyze(
             sma_50=sma50,
             rsi=rsi,
             stop_loss=stop_loss,
+            take_profit=take_profit,
             timeframe=tf_key,
             market=market,
             currency=currency,

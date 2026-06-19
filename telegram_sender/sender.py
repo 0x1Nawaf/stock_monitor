@@ -138,14 +138,14 @@ def sendMessage(res: StockAnalysis) -> bool:
     direction = "+" if res.predicted_return_pct >= 0 else ""
 
     action = ""
-    if res.signal.value in ("STRONG BUY", "BUY", "LEAN BUY"):
+    if res.signal.value in ("STRONG BUY", "BUY"):
         action = f"🟢 <b>Buy at {res.currency}{res.price:.2f}</b>\n"
+        if res.take_profit > 0:
+            tp_pct = abs(res.take_profit - res.price) / res.price * 100
+            action += f"🎯 Take profit: {res.currency}{res.take_profit:.2f} (+{tp_pct:.1f}%)\n"
         if res.stop_loss > 0:
-            action += f"🛑 Stop loss: {res.currency}{res.stop_loss:.2f}\n"
-    elif res.signal.value in ("STRONG SELL", "SELL", "LEAN SELL"):
-        action = f"🔴 <b>Sell at {res.currency}{res.price:.2f}</b>\n"
-        if res.stop_loss > 0:
-            action += f"🛑 Stop loss: {res.currency}{res.stop_loss:.2f}\n"
+            sl_pct = abs(res.stop_loss - res.price) / res.price * 100
+            action += f"🛑 Stop loss: {res.currency}{res.stop_loss:.2f} (-{sl_pct:.1f}%)\n"
 
     text = (
         f"{signal_icon} <b>{res.ticker}</b> — {res.signal.value}\n"
