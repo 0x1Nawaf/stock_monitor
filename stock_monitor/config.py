@@ -29,13 +29,13 @@ HISTORY_PERIOD = "5y"
 MIN_DATA_POINTS = 200
 
 SEQUENCE_LENGTH = 60
-HIDDEN_SIZE = 128
-NUM_LAYERS = 2
-DROPOUT = 0.2
-LEARNING_RATE = 1e-3
-MAX_EPOCHS = 100
-BATCH_SIZE = 32
-EARLY_STOP_PATIENCE = 10
+HIDDEN_SIZE = 256
+NUM_LAYERS = 3
+DROPOUT = 0.3
+LEARNING_RATE = 5e-4
+MAX_EPOCHS = 150
+BATCH_SIZE = 64
+EARLY_STOP_PATIENCE = 15
 PREDICTION_HORIZON = 5
 MODEL_MAX_AGE_DAYS = 7
 
@@ -91,25 +91,33 @@ SWING_SIGNAL_THRESHOLDS: dict[Signal, float] = {
 
 MAX_REPORT_FILES = 50
 
-GBM_WEIGHT = 0.6
-LSTM_WEIGHT = 0.4
+GBM_WEIGHT = 0.55
+LSTM_WEIGHT = 0.45
 
 GBM_PARAMS = {
-    "objective": "multiclass",
-    "num_class": 3,
-    "metric": "multi_logloss",
+    "objective": "binary",
+    "metric": "auc",
     "boosting_type": "gbdt",
-    "num_leaves": 31,
-    "learning_rate": 0.05,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 5,
-    "min_child_samples": 20,
-    "lambda_l1": 0.1,
+    "num_leaves": 63,
+    "learning_rate": 0.03,
+    "feature_fraction": 0.7,
+    "bagging_fraction": 0.7,
+    "bagging_freq": 3,
+    "min_child_samples": 10,
+    "lambda_l1": 0.05,
     "lambda_l2": 0.1,
+    "max_depth": 8,
+    "min_gain_to_split": 0.01,
+    "path_smooth": 0.1,
     "verbose": -1,
     "seed": 42,
+    "is_unbalance": True,
 }
+
+GBM_NUM_BOOST_ROUND = 1000
+GBM_EARLY_STOPPING = 50
+
+N_CV_SPLITS = 5
 
 
 @dataclass(frozen=True)

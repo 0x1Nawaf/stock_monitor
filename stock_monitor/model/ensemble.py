@@ -6,16 +6,11 @@ from typing import Optional
 
 import numpy as np
 
-from ..config import Signal
+from ..config import Signal, GBM_WEIGHT, LSTM_WEIGHT
 from .gbm import GBMPrediction
 from .lstm_clf import LSTMPrediction
 
 log = logging.getLogger(__name__)
-
-DEFAULT_GBM_WEIGHT = 0.6
-DEFAULT_LSTM_WEIGHT = 0.4
-
-BASELINE_PROB = 1.0 / 3.0
 
 
 @dataclass
@@ -27,35 +22,47 @@ class EnsemblePrediction:
     gbm_agrees: bool
     lstm_agrees: bool
     ensemble_agreement: float
+    directional_strength: float = 0.0
 
 
-def _calibrate_confidence(probabilities: np.ndarray, predicted_class: int = -1) -> float:
-    if predicted_class < 0:
-        predicted_class = int(np.argmax(probabilities))
+def _compute_confidence(
+    probabilities: np.ndarray,
+    predicted_class: int,
+    agreement: float,
+) -> float:
+    """Confidence based on probability dominance and model agreement.
 
+    Uses the actual probability spread to determine conviction:
+    - If prob_up = 0.7, prob_down = 0.1 -> very confident bullish
+    - If both models agree -> boost confidence further
+    """
     prob_top = float(probabilities[predicted_class])
+    sorted_probs = np.sort(probabilities)[::-1]
+    margin = sorted_probs[0] - sorted_probs[1]
 
-    if predicted_class == 2:
-        prob_opposite = float(probabilities[0])
-    elif predicted_class == 0:
-        prob_opposite = float(probabilities[2])
-    else:
-        prob_opposite = float(max(probabilities[0], probabilities[2]))
+    base_confidence = prob_top
 
-    if prob_top + prob_opposite < 1e-8:
-        return 0.0
+    margin_boost = min(0.15, margin * 0.5)
 
-    directional = prob_top / (prob_top + prob_opposite)
-    edge = max(0.0, prob_top - BASELINE_PROB) / (1.0 - BASELINE_PROB)
-    confidence = 0.7 * directional + 0.3 * edge
-    return round(max(0.0, min(0.99, confidence)), 3)
+    agreement_factor = 0.85 + 0.15 * agreement
+
+    confidence = (base_confidence + margin_boost) * agreement_factor
+
+    return round(np.clip(confidence, 0.05, 0.98), 3)
+
+
+def _directional_strength(probabilities: np.ndarray) -> float:
+    """How strongly the prediction leans bullish or bearish. Range: -1 to +1."""
+    prob_up = float(probabilities[2])
+    prob_down = float(probabilities[0])
+    return prob_up - prob_down
 
 
 def combine_predictions(
     gbm_pred: Optional[GBMPrediction],
     lstm_pred: Optional[LSTMPrediction],
-    gbm_weight: float = DEFAULT_GBM_WEIGHT,
-    lstm_weight: float = DEFAULT_LSTM_WEIGHT,
+    gbm_weight: float = GBM_WEIGHT,
+    lstm_weight: float = LSTM_WEIGHT,
 ) -> EnsemblePrediction:
     if gbm_pred is None and lstm_pred is None:
         return EnsemblePrediction(
@@ -66,10 +73,11 @@ def combine_predictions(
             gbm_agrees=True,
             lstm_agrees=True,
             ensemble_agreement=1.0,
+            directional_strength=0.0,
         )
 
     if gbm_pred is None:
-        conf = _calibrate_confidence(lstm_pred.probabilities, lstm_pred.predicted_class)
+        conf = _compute_confidence(lstm_pred.probabilities, lstm_pred.predicted_class, 1.0)
         return EnsemblePrediction(
             predicted_class=lstm_pred.predicted_class,
             probabilities=lstm_pred.probabilities,
@@ -78,10 +86,11 @@ def combine_predictions(
             gbm_agrees=True,
             lstm_agrees=True,
             ensemble_agreement=1.0,
+            directional_strength=_directional_strength(lstm_pred.probabilities),
         )
 
     if lstm_pred is None:
-        conf = _calibrate_confidence(gbm_pred.probabilities, gbm_pred.predicted_class)
+        conf = _compute_confidence(gbm_pred.probabilities, gbm_pred.predicted_class, 1.0)
         return EnsemblePrediction(
             predicted_class=gbm_pred.predicted_class,
             probabilities=gbm_pred.probabilities,
@@ -90,25 +99,46 @@ def combine_predictions(
             gbm_agrees=True,
             lstm_agrees=True,
             ensemble_agreement=1.0,
+            directional_strength=_directional_strength(gbm_pred.probabilities),
         )
 
     total_weight = gbm_weight + lstm_weight
     w_gbm = gbm_weight / total_weight
     w_lstm = lstm_weight / total_weight
 
-    combined_probs = w_gbm * gbm_pred.probabilities + w_lstm * lstm_pred.probabilities
-    predicted_class = int(np.argmax(combined_probs))
-    confidence = _calibrate_confidence(combined_probs, predicted_class)
+    gbm_direction = int(np.argmax(gbm_pred.probabilities))
+    lstm_direction = int(np.argmax(lstm_pred.probabilities))
 
-    gbm_agrees = gbm_pred.predicted_class == predicted_class
-    lstm_agrees = lstm_pred.predicted_class == predicted_class
-
-    if gbm_agrees and lstm_agrees:
+    if gbm_direction == lstm_direction:
+        boost = 1.15
+        combined_probs = (
+            w_gbm * gbm_pred.probabilities + w_lstm * lstm_pred.probabilities
+        )
+        combined_probs[gbm_direction] *= boost
+        combined_probs /= combined_probs.sum()
         agreement = 1.0
-    elif gbm_agrees or lstm_agrees:
-        agreement = 0.7
+    elif (gbm_direction == 2 and lstm_direction == 1) or (gbm_direction == 0 and lstm_direction == 1):
+        combined_probs = (
+            0.65 * gbm_pred.probabilities + 0.35 * lstm_pred.probabilities
+        )
+        agreement = 0.75
+    elif (lstm_direction == 2 and gbm_direction == 1) or (lstm_direction == 0 and gbm_direction == 1):
+        combined_probs = (
+            0.45 * gbm_pred.probabilities + 0.55 * lstm_pred.probabilities
+        )
+        agreement = 0.75
     else:
+        combined_probs = (
+            w_gbm * gbm_pred.probabilities + w_lstm * lstm_pred.probabilities
+        )
         agreement = 0.4
+
+    predicted_class = int(np.argmax(combined_probs))
+    gbm_agrees = gbm_direction == predicted_class
+    lstm_agrees = lstm_direction == predicted_class
+
+    confidence = _compute_confidence(combined_probs, predicted_class, agreement)
+    dir_strength = _directional_strength(combined_probs)
 
     age = max(gbm_pred.model_age_days, lstm_pred.model_age_days)
 
@@ -120,6 +150,7 @@ def combine_predictions(
         gbm_agrees=gbm_agrees,
         lstm_agrees=lstm_agrees,
         ensemble_agreement=agreement,
+        directional_strength=dir_strength,
     )
 
 
@@ -134,69 +165,99 @@ def prediction_to_signal(
     prob_down = float(prediction.probabilities[TargetClass.DOWN])
     prob_flat = float(prediction.probabilities[TargetClass.FLAT])
 
-    edge_up = prob_up - BASELINE_PROB
-    edge_down = prob_down - BASELINE_PROB
-    net_edge = edge_up - edge_down
+    dir_strength = prediction.directional_strength
+    confidence = prediction.confidence
+    agreement = prediction.ensemble_agreement
 
-    conviction = net_edge * prediction.ensemble_agreement
-    score = int(max(-100, min(100, conviction * 300)))
+    score = int(np.clip(dir_strength * confidence * 200, -100, 100))
 
-    strong_buy_t = thresholds.get(Signal.STRONG_BUY, 0.04)
-    buy_t = thresholds.get(Signal.BUY, 0.02)
-    lean_buy_t = thresholds.get(Signal.LEAN_BUY, 0.005)
-    lean_sell_t = thresholds.get(Signal.LEAN_SELL, -0.005)
-    sell_t = thresholds.get(Signal.SELL, -0.02)
-    strong_sell_t = thresholds.get(Signal.STRONG_SELL, -0.04)
+    signal = _determine_signal(
+        prob_up, prob_down, prob_flat,
+        confidence, agreement, prediction.predicted_class,
+    )
 
-    scale = strong_buy_t / 0.04 if strong_buy_t > 0 else 1.0
-    prob_strong = 0.20 * scale
-    prob_buy = 0.10 * scale
-    prob_lean = 0.03 * scale
-    prob_flat_edge = lean_buy_t * 2
+    reasons = _build_reasons(
+        signal, prediction, prob_up, prob_down, prob_flat,
+        horizon_label, confidence,
+    )
+
+    return signal, score, reasons
+
+
+def _determine_signal(
+    prob_up: float,
+    prob_down: float,
+    prob_flat: float,
+    confidence: float,
+    agreement: float,
+    predicted_class: int,
+) -> Signal:
+    from ..targets import TargetClass
+
+    spread = prob_up - prob_down
+
+    if predicted_class == TargetClass.UP:
+        if spread > 0.30 and confidence >= 0.70 and agreement >= 0.9:
+            return Signal.STRONG_BUY
+        elif spread > 0.20 and confidence >= 0.60:
+            return Signal.BUY
+        elif spread > 0.08 and confidence >= 0.45:
+            return Signal.LEAN_BUY
+        else:
+            return Signal.HOLD
+
+    elif predicted_class == TargetClass.DOWN:
+        if spread < -0.30 and confidence >= 0.70 and agreement >= 0.9:
+            return Signal.STRONG_SELL
+        elif spread < -0.20 and confidence >= 0.60:
+            return Signal.SELL
+        elif spread < -0.08 and confidence >= 0.45:
+            return Signal.LEAN_SELL
+        else:
+            return Signal.HOLD
+
+    else:
+        if spread > 0.12 and confidence >= 0.50:
+            return Signal.LEAN_BUY
+        elif spread < -0.12 and confidence >= 0.50:
+            return Signal.LEAN_SELL
+        return Signal.HOLD
+
+
+def _build_reasons(
+    signal: Signal,
+    prediction: EnsemblePrediction,
+    prob_up: float,
+    prob_down: float,
+    prob_flat: float,
+    horizon_label: str,
+    confidence: float,
+) -> list[str]:
+    from ..targets import TargetClass
 
     reasons = []
-
-    if prediction.predicted_class == TargetClass.UP:
-        if prob_up > prob_down + prob_strong and prediction.ensemble_agreement >= 0.9:
-            signal = Signal.STRONG_BUY
-        elif prob_up > prob_down + prob_buy:
-            signal = Signal.BUY
-        elif prob_up > prob_down + prob_lean:
-            signal = Signal.LEAN_BUY
-        else:
-            signal = Signal.HOLD
-    elif prediction.predicted_class == TargetClass.DOWN:
-        if prob_down > prob_up + prob_strong and prediction.ensemble_agreement >= 0.9:
-            signal = Signal.STRONG_SELL
-        elif prob_down > prob_up + prob_buy:
-            signal = Signal.SELL
-        elif prob_down > prob_up + prob_lean:
-            signal = Signal.LEAN_SELL
-        else:
-            signal = Signal.HOLD
-    else:
-        if edge_up > prob_flat_edge:
-            signal = Signal.LEAN_BUY
-        elif edge_down > prob_flat_edge:
-            signal = Signal.LEAN_SELL
-        else:
-            signal = Signal.HOLD
-
     class_names = {TargetClass.UP: "UP", TargetClass.DOWN: "DOWN", TargetClass.FLAT: "FLAT"}
+
     reasons.append(
-        f"Ensemble predicts {class_names[prediction.predicted_class]} over {horizon_label}"
+        f"Prediction: {class_names[prediction.predicted_class]} over {horizon_label} "
+        f"({confidence:.0%} confidence)"
     )
     reasons.append(
         f"Probabilities: UP={prob_up:.0%} FLAT={prob_flat:.0%} DOWN={prob_down:.0%}"
     )
-    reasons.append(f"Confidence: {prediction.confidence:.0%}")
 
     if prediction.ensemble_agreement >= 0.9:
-        reasons.append("Both models agree on direction")
+        reasons.append("Strong model consensus -- both GBM & LSTM agree")
     elif prediction.ensemble_agreement <= 0.5:
-        reasons.append("Models disagree -- signal less reliable")
+        reasons.append("Models disagree -- lower conviction")
+
+    strength = abs(prediction.directional_strength)
+    if strength > 0.4:
+        reasons.append(f"Strong directional bias ({strength:.0%})")
+    elif strength > 0.2:
+        reasons.append(f"Moderate directional lean ({strength:.0%})")
 
     if prediction.model_age_days > 5:
-        reasons.append(f"Model trained {prediction.model_age_days:.0f} days ago -- consider retraining")
+        reasons.append(f"Model is {prediction.model_age_days:.0f} days old -- consider retraining")
 
-    return signal, score, reasons
+    return reasons

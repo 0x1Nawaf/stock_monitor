@@ -19,17 +19,17 @@ class TargetClass(IntEnum):
 
 
 DEFAULT_THRESHOLDS = {
-    1: (0.008, -0.008),
-    5: (0.02, -0.02),
-    10: (0.03, -0.03),
-    21: (0.05, -0.05),
+    1: (0.005, -0.005),
+    5: (0.015, -0.015),
+    10: (0.025, -0.025),
+    21: (0.04, -0.04),
 }
 
 
 def get_thresholds(horizon: int) -> tuple[float, float]:
     if horizon in DEFAULT_THRESHOLDS:
         return DEFAULT_THRESHOLDS[horizon]
-    up = 0.004 * horizon
+    up = 0.003 * horizon
     return (up, -up)
 
 
@@ -52,6 +52,41 @@ def build_classification_targets(
 
     targets[future_return.isna()] = -1
 
+    return targets
+
+
+def build_binary_targets(
+    df: pd.DataFrame,
+    horizon: int = PREDICTION_HORIZON,
+    threshold: Optional[float] = None,
+) -> pd.Series:
+    """Binary target: 1 if price goes UP by threshold, 0 otherwise.
+
+    This avoids the 3-class problem where GBM spreads probability too thin.
+    """
+    if threshold is None:
+        threshold, _ = get_thresholds(horizon)
+
+    future_return = df["Close"].pct_change(horizon).shift(-horizon)
+    targets = pd.Series(0, index=df.index, dtype=int)
+    targets[future_return >= threshold] = 1
+    targets[future_return.isna()] = -1
+    return targets
+
+
+def build_binary_targets_down(
+    df: pd.DataFrame,
+    horizon: int = PREDICTION_HORIZON,
+    threshold: Optional[float] = None,
+) -> pd.Series:
+    """Binary target: 1 if price goes DOWN by threshold, 0 otherwise."""
+    if threshold is None:
+        _, threshold = get_thresholds(horizon)
+
+    future_return = df["Close"].pct_change(horizon).shift(-horizon)
+    targets = pd.Series(0, index=df.index, dtype=int)
+    targets[future_return <= threshold] = 1
+    targets[future_return.isna()] = -1
     return targets
 
 
@@ -90,6 +125,17 @@ def get_class_weights(targets: np.ndarray) -> dict[int, float]:
         else:
             weights[cls] = 1.0
     return weights
+
+
+def get_binary_class_weights(targets: np.ndarray) -> tuple[float, float]:
+    valid = targets[targets >= 0]
+    if len(valid) == 0:
+        return 1.0, 1.0
+    pos = (valid == 1).sum()
+    neg = (valid == 0).sum()
+    if pos == 0 or neg == 0:
+        return 1.0, 1.0
+    return neg / pos, 1.0
 
 
 def target_distribution(targets: np.ndarray) -> dict[str, float]:

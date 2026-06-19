@@ -5,7 +5,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [project]
 name = "stock-monitor"
 version = "1.0.0"
-description = "AI-powered stock prediction engine with GBM + LSTM ensemble"
+description = "AI-powered stock prediction engine with dual-binary GBM + LSTM ensemble"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31,<3",

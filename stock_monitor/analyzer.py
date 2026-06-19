@@ -11,6 +11,8 @@ from .config import Signal, TIMEFRAME_5D, TimeframeConfig
 from .data import fetch_stock_data, fetch_live_price
 from .features import build_all_features
 from .targets import (
+    build_binary_targets,
+    build_binary_targets_down,
     build_classification_targets,
     get_thresholds,
     get_class_weights,
@@ -147,10 +149,12 @@ def _current_indicators(
 
 def _estimated_return_from_probs(probs: np.ndarray, horizon: int) -> float:
     up_thresh, down_thresh = get_thresholds(horizon)
+    mid_up = up_thresh * 1.5
+    mid_down = down_thresh * 1.5
     expected = (
-        probs[TargetClass.UP] * up_thresh
+        probs[TargetClass.UP] * mid_up
         + probs[TargetClass.FLAT] * 0.0
-        + probs[TargetClass.DOWN] * down_thresh
+        + probs[TargetClass.DOWN] * mid_down
     )
     return float(expected)
 
@@ -179,24 +183,36 @@ def analyze(
 
         horizon = timeframe.horizon
         up_thresh, down_thresh = get_thresholds(horizon)
-        targets = build_classification_targets(df, horizon, up_thresh, down_thresh)
-        targets = targets.reindex(features_df.index)
+
+        targets_up = build_binary_targets(df, horizon, up_thresh)
+        targets_up = targets_up.reindex(features_df.index)
+
+        targets_down = build_binary_targets_down(df, horizon, down_thresh)
+        targets_down = targets_down.reindex(features_df.index)
+
+        targets_cls = build_classification_targets(df, horizon, up_thresh, down_thresh)
+        targets_cls = targets_cls.reindex(features_df.index)
 
         features_arr = features_df.values
-        targets_arr = targets.values
+        targets_up_arr = targets_up.values
+        targets_down_arr = targets_down.values
+        targets_cls_arr = targets_cls.values
 
-        class_weights = get_class_weights(targets_arr)
+        class_weights = get_class_weights(targets_cls_arr)
 
-        gbm_model = train_gbm(
+        gbm_model_up, gbm_model_down = train_gbm(
             ticker,
             features_arr,
-            targets_arr,
+            targets_up_arr,
+            targets_down_arr,
             force=force_retrain,
             models_dir=timeframe.models_dir,
             max_age_days=timeframe.model_max_age_days,
-            class_weights=class_weights,
         )
-        gbm_pred = predict_gbm(ticker, gbm_model, features_arr, models_dir=timeframe.models_dir)
+        gbm_pred = predict_gbm(
+            ticker, gbm_model_up, gbm_model_down,
+            features_arr, models_dir=timeframe.models_dir,
+        )
 
         lstm_pred = None
         if use_lstm:
@@ -204,7 +220,7 @@ def analyze(
                 lstm_model = train_lstm_classifier(
                     ticker,
                     features_arr,
-                    targets_arr,
+                    targets_cls_arr,
                     force=force_retrain,
                     models_dir=timeframe.models_dir,
                     seq_len=timeframe.sequence_length,

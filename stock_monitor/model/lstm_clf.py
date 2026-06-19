@@ -27,6 +27,31 @@ from ..config import (
 log = logging.getLogger(__name__)
 
 
+class MultiScaleAttention(nn.Module):
+    """Multi-head attention across different temporal scales."""
+
+    def __init__(self, hidden_size: int, n_heads: int = 4):
+        super().__init__()
+        self.heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_size, hidden_size // n_heads),
+                nn.Tanh(),
+                nn.Linear(hidden_size // n_heads, 1),
+            )
+            for _ in range(n_heads)
+        ])
+        self.combine = nn.Linear(hidden_size * n_heads, hidden_size)
+
+    def forward(self, lstm_out: torch.Tensor) -> torch.Tensor:
+        contexts = []
+        for head in self.heads:
+            weights = torch.softmax(head(lstm_out).squeeze(-1), dim=1)
+            context = torch.bmm(weights.unsqueeze(1), lstm_out).squeeze(1)
+            contexts.append(context)
+        combined = torch.cat(contexts, dim=-1)
+        return self.combine(combined)
+
+
 class StockLSTMClassifier(nn.Module):
     def __init__(
         self,
@@ -37,30 +62,33 @@ class StockLSTMClassifier(nn.Module):
         num_classes: int = 3,
     ):
         super().__init__()
+        self.input_norm = nn.LayerNorm(input_size)
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout if num_layers > 1 else 0.0,
             batch_first=True,
+            bidirectional=False,
         )
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.Tanh(),
-            nn.Linear(hidden_size // 2, 1),
-        )
+        self.attention = MultiScaleAttention(hidden_size, n_heads=4)
         self.head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
+            nn.Linear(hidden_size + hidden_size, hidden_size),
+            nn.GELU(),
             nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
             nn.Linear(hidden_size // 2, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        lstm_out, _ = self.lstm(x)
-        attn_weights = torch.softmax(self.attention(lstm_out).squeeze(-1), dim=1)
-        context = torch.bmm(attn_weights.unsqueeze(1), lstm_out).squeeze(1)
-        return self.head(context)
+        x = self.input_norm(x)
+        lstm_out, (h_n, _) = self.lstm(x)
+        attn_context = self.attention(lstm_out)
+        last_hidden = h_n[-1]
+        combined = torch.cat([attn_context, last_hidden], dim=-1)
+        return self.head(combined)
 
 
 @dataclass
@@ -109,6 +137,14 @@ def _build_sequences(
     return xs, ys
 
 
+def _augment_sequences(X: np.ndarray, y: np.ndarray, noise_std: float = 0.01) -> tuple[np.ndarray, np.ndarray]:
+    """Add Gaussian noise augmentation to increase training data."""
+    noise = np.random.randn(*X.shape).astype(np.float32) * noise_std
+    X_aug = np.concatenate([X, X + noise], axis=0)
+    y_aug = np.concatenate([y, y], axis=0)
+    return X_aug, y_aug
+
+
 def train_lstm_classifier(
     ticker: str,
     features: np.ndarray,
@@ -129,7 +165,7 @@ def train_lstm_classifier(
 
     log.info("Training LSTM classifier for %s (%d samples)", ticker, len(features))
 
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.preprocessing import RobustScaler
 
     valid_mask = targets >= 0
     X = features[valid_mask].astype(np.float64)
@@ -147,15 +183,17 @@ def train_lstm_classifier(
     X_train_raw, X_val_raw = X[:split_idx], X[split_idx:]
     y_train_raw, y_val_raw = y[:split_idx], y[split_idx:]
 
-    scaler = StandardScaler()
+    scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train_raw)
     X_val_scaled = scaler.transform(X_val_raw)
 
     X_train_seq, y_train_seq = _build_sequences(X_train_scaled, y_train_raw, seq_len)
     X_val_seq, y_val_seq = _build_sequences(X_val_scaled, y_val_raw, seq_len)
 
-    if len(X_train_seq) < BATCH_SIZE or len(X_val_seq) < BATCH_SIZE:
+    if len(X_train_seq) < BATCH_SIZE or len(X_val_seq) < 8:
         raise ValueError(f"Insufficient sequences for {ticker}")
+
+    X_train_seq, y_train_seq = _augment_sequences(X_train_seq, y_train_seq, noise_std=0.005)
 
     train_ds = TensorDataset(
         torch.from_numpy(X_train_seq),
@@ -165,7 +203,7 @@ def train_lstm_classifier(
         torch.from_numpy(X_val_seq),
         torch.from_numpy(y_val_seq),
     )
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
     device = _get_device()
@@ -181,12 +219,12 @@ def train_lstm_classifier(
             [class_weights.get(i, 1.0) for i in range(3)],
             dtype=torch.float32,
         ).to(device)
-        criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+        criterion = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.05)
     else:
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=20, T_mult=2)
 
     best_val_loss = float("inf")
     patience_counter = 0
@@ -205,25 +243,34 @@ def train_lstm_classifier(
             optimizer.step()
             train_loss += loss.item() * len(bx)
         train_loss /= len(train_ds)
+        scheduler.step(epoch)
 
         model.eval()
         val_loss = 0.0
+        correct = 0
+        total = 0
         with torch.no_grad():
             for bx, by in val_loader:
                 bx, by = bx.to(device), by.to(device)
-                val_loss += criterion(model(bx), by).item() * len(bx)
+                logits = model(bx)
+                val_loss += criterion(logits, by).item() * len(bx)
+                preds = logits.argmax(dim=1)
+                correct += (preds == by).sum().item()
+                total += len(by)
         val_loss /= len(val_ds)
+        val_acc = correct / max(total, 1)
 
-        scheduler.step(val_loss)
-
-        if val_loss < best_val_loss:
+        if val_loss < best_val_loss - 1e-4:
             best_val_loss = val_loss
             patience_counter = 0
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         else:
             patience_counter += 1
             if patience_counter >= EARLY_STOP_PATIENCE:
-                log.info("LSTM early stop at epoch %d (val_loss=%.4f)", epoch + 1, best_val_loss)
+                log.info(
+                    "LSTM early stop at epoch %d (val_loss=%.4f, val_acc=%.1f%%)",
+                    epoch + 1, best_val_loss, val_acc * 100,
+                )
                 break
 
     if best_state:
@@ -233,13 +280,13 @@ def train_lstm_classifier(
     models_dir.mkdir(parents=True, exist_ok=True)
     save_data = {
         "model_state": model.state_dict(),
-        "scaler_mean": scaler.mean_,
+        "scaler_center": scaler.center_,
         "scaler_scale": scaler.scale_,
         "input_size": input_size,
     }
     torch.save(save_data, _model_path(ticker, models_dir))
 
-    model.scaler_mean_ = scaler.mean_
+    model.scaler_center_ = scaler.center_
     model.scaler_scale_ = scaler.scale_
 
     return model
@@ -263,8 +310,8 @@ def _load_model(
         )
         model.load_state_dict(data["model_state"])
         model.eval()
-        model.scaler_mean_ = data["scaler_mean"]
-        model.scaler_scale_ = data["scaler_scale"]
+        model.scaler_center_ = data.get("scaler_center", data.get("scaler_mean"))
+        model.scaler_scale_ = data.get("scaler_scale")
         return model
     except Exception as exc:
         log.warning("Failed to load LSTM classifier for %s: %s", ticker, exc)
@@ -278,9 +325,9 @@ def predict_lstm(
     models_dir: Path = MODELS_DIR,
     seq_len: int = SEQUENCE_LENGTH,
 ) -> LSTMPrediction:
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.preprocessing import RobustScaler
 
-    if not hasattr(model, "scaler_mean_") or model.scaler_mean_ is None:
+    if not hasattr(model, "scaler_center_") or model.scaler_center_ is None:
         path = _model_path(ticker, models_dir)
         if not path.exists():
             return LSTMPrediction(
@@ -288,19 +335,17 @@ def predict_lstm(
                 confidence=0.34, model_age_days=0.0,
             )
         data = torch.load(path, map_location="cpu", weights_only=False)
-        model.scaler_mean_ = data["scaler_mean"]
-        model.scaler_scale_ = data["scaler_scale"]
+        model.scaler_center_ = data.get("scaler_center", data.get("scaler_mean"))
+        model.scaler_scale_ = data.get("scaler_scale")
 
-    scaler = StandardScaler()
-    scaler.mean_ = model.scaler_mean_
+    scaler = RobustScaler()
+    scaler.center_ = model.scaler_center_
     scaler.scale_ = model.scaler_scale_
-    scaler.var_ = scaler.scale_ ** 2
-    scaler.n_features_in_ = len(scaler.mean_)
 
     device = _get_device()
     model.to(device).eval()
 
-    lookback = min(5, len(features) - seq_len)
+    lookback = min(7, max(1, len(features) - seq_len))
     windows = []
     for offset in range(lookback + 1):
         if offset == 0:
@@ -309,6 +354,12 @@ def predict_lstm(
             w = features[-(seq_len + offset):-offset]
         if len(w) >= seq_len:
             windows.append(w[-seq_len:])
+
+    if not windows:
+        return LSTMPrediction(
+            predicted_class=1, probabilities=np.array([0.33, 0.34, 0.33]),
+            confidence=0.34, model_age_days=0.0,
+        )
 
     stacked = np.stack(windows)
     if not np.isfinite(stacked).all():
@@ -321,7 +372,10 @@ def predict_lstm(
         logits = model(x)
         probs = torch.softmax(logits, dim=1).cpu().numpy()
 
-    avg_probs = probs.mean(axis=0)
+    weights = np.array([1.0 / (1 + i * 0.3) for i in range(len(probs))])
+    weights /= weights.sum()
+    avg_probs = (probs * weights[:, None]).sum(axis=0)
+
     predicted_class = int(np.argmax(avg_probs))
     confidence = float(avg_probs[predicted_class])
 
