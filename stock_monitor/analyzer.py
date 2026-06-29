@@ -9,7 +9,7 @@ import pandas as pd
 
 from .config import Signal, TIMEFRAME_5D, TimeframeConfig
 from .data import fetch_stock_data, fetch_live_price
-from .features import build_all_features
+from .features import build_all_features, build_market_structure
 from .targets import (
     build_binary_targets,
     build_binary_targets_down,
@@ -52,6 +52,7 @@ class StockAnalysis:
     prob_flat: float = 0.0
     ensemble_agreement: float = 0.0
     model_type: str = "ensemble"
+    market_structure: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -80,6 +81,7 @@ class StockAnalysis:
             "prob_flat": self.prob_flat,
             "ensemble_agreement": self.ensemble_agreement,
             "model_type": self.model_type,
+            "market_structure": self.market_structure,
         }
 
     @classmethod
@@ -173,6 +175,71 @@ def _current_indicators(
     return sma20, sma50, rsi_val
 
 
+def _analyze_market_structure(
+    df: pd.DataFrame, swing_length: int = 5
+) -> tuple[str, list[str]]:
+    """Run BOS/MSS analysis and return a structure summary + reason lines.
+
+    Returns:
+        (structure_label, reasons) where structure_label is one of:
+        "bullish_bos", "bearish_bos", "bullish_mss", "bearish_mss",
+        "bullish", "bearish", or "neutral".
+    """
+    ms = build_market_structure(df, swing_length=swing_length)
+    if ms.empty:
+        return "neutral", []
+
+    reasons: list[str] = []
+    last = ms.iloc[-1]
+
+    direction = last.get("structure_direction", 0.0)
+    score = last.get("structure_score", 0.0)
+
+    lookback = min(3, len(ms))
+    recent = ms.tail(lookback)
+
+    recent_bos_bull = recent["bos_bullish"].sum() > 0
+    recent_bos_bear = recent["bos_bearish"].sum() > 0
+    recent_mss_bull = recent["mss_bullish"].sum() > 0
+    recent_mss_bear = recent["mss_bearish"].sum() > 0
+
+    recent_hh = recent["swing_high_hh"].sum() > 0
+    recent_hl = recent["swing_low_hl"].sum() > 0
+    recent_lh = recent["swing_high_lh"].sum() > 0
+    recent_ll = recent["swing_low_ll"].sum() > 0
+
+    if recent_hh:
+        reasons.append("Swing structure: Higher High detected")
+    if recent_hl:
+        reasons.append("Swing structure: Higher Low detected")
+    if recent_lh:
+        reasons.append("Swing structure: Lower High detected")
+    if recent_ll:
+        reasons.append("Swing structure: Lower Low detected")
+
+    if recent_mss_bull:
+        reasons.append("Market Structure Shift (MSS) -- bullish reversal signal")
+        return "bullish_mss", reasons
+    if recent_mss_bear:
+        reasons.append("Market Structure Shift (MSS) -- bearish reversal signal")
+        return "bearish_mss", reasons
+    if recent_bos_bull:
+        reasons.append("Break of Structure (BOS) -- bullish continuation")
+        return "bullish_bos", reasons
+    if recent_bos_bear:
+        reasons.append("Break of Structure (BOS) -- bearish continuation")
+        return "bearish_bos", reasons
+
+    if direction > 0:
+        reasons.append(f"Market structure: bullish (score {score:.0f})")
+        return "bullish", reasons
+    elif direction < 0:
+        reasons.append(f"Market structure: bearish (score {score:.0f})")
+        return "bearish", reasons
+
+    return "neutral", reasons
+
+
 _HORIZON_EXPECTED_MOVE = {
     1: (0.025, -0.025),
     5: (0.07, -0.07),
@@ -218,7 +285,12 @@ def analyze(
         if df is None:
             return StockAnalysis.failed(ticker, "Insufficient historical data", tf_key, market, currency)
 
-        features_df = build_all_features(df, market_df, vix_df)
+        is_swing = timeframe.horizon == 10
+        features_df = build_all_features(
+            df, market_df, vix_df,
+            include_structure=is_swing,
+            swing_length=5,
+        )
         if len(features_df) < 200:
             return StockAnalysis.failed(ticker, "Insufficient features after engineering", tf_key, market, currency)
 
@@ -345,6 +417,41 @@ def analyze(
         elif rsi < 30:
             reasons.append(f"RSI at {rsi} -- oversold territory")
 
+        structure_label = ""
+        if is_swing:
+            structure_label, structure_reasons = _analyze_market_structure(df)
+            reasons.extend(structure_reasons)
+
+            bullish_signal = signal in (Signal.STRONG_BUY, Signal.BUY, Signal.LEAN_BUY)
+            bearish_signal = signal in (Signal.STRONG_SELL, Signal.SELL, Signal.LEAN_SELL)
+
+            if structure_label == "bullish_mss" and bearish_signal:
+                signal = Signal.HOLD
+                score = int(score * 0.3)
+                reasons.append("Signal dampened: MSS contradicts bearish prediction")
+            elif structure_label == "bearish_mss" and bullish_signal:
+                signal = Signal.HOLD
+                score = int(score * 0.3)
+                reasons.append("Signal dampened: MSS contradicts bullish prediction")
+            elif structure_label == "bullish_bos" and bullish_signal:
+                if signal == Signal.LEAN_BUY:
+                    signal = Signal.BUY
+                    reasons.append("Signal upgraded: BOS confirms bullish momentum")
+                elif signal == Signal.BUY:
+                    score = min(100, int(score * 1.15))
+                    reasons.append("Conviction boosted: BOS confirms bullish trend")
+            elif structure_label == "bearish_bos" and bearish_signal:
+                if signal == Signal.LEAN_SELL:
+                    signal = Signal.SELL
+                    reasons.append("Signal upgraded: BOS confirms bearish momentum")
+                elif signal == Signal.SELL:
+                    score = max(-100, int(score * 1.15))
+                    reasons.append("Conviction boosted: BOS confirms bearish trend")
+            elif structure_label == "bullish_bos" and bearish_signal:
+                reasons.append("Caution: bullish BOS conflicts with bearish signal")
+            elif structure_label == "bearish_bos" and bullish_signal:
+                reasons.append("Caution: bearish BOS conflicts with bullish signal")
+
         model_type = "ensemble" if lstm_pred is not None else "gbm"
 
         return StockAnalysis(
@@ -372,6 +479,7 @@ def analyze(
             prob_flat=round(float(ensemble.probabilities[TargetClass.FLAT]), 3),
             ensemble_agreement=ensemble.ensemble_agreement,
             model_type=model_type,
+            market_structure=structure_label,
         )
     except Exception as exc:
         log.exception("Failed to analyze %s", ticker)

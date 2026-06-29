@@ -163,6 +163,20 @@ def sendMessage(res: StockAnalysis) -> bool:
         f"<i>{market_flag} {res.market} Market  •  Model age: {res.model_age_days:.0f}d</i>"
     )
 
+    structure = getattr(res, "market_structure", "")
+    if structure:
+        _structure_labels = {
+            "bullish_bos": "📈 BOS — Bullish continuation",
+            "bearish_bos": "📉 BOS — Bearish continuation",
+            "bullish_mss": "🔄 MSS — Bullish reversal",
+            "bearish_mss": "🔄 MSS — Bearish reversal",
+            "bullish": "📈 Bullish structure",
+            "bearish": "📉 Bearish structure",
+        }
+        label = _structure_labels.get(structure)
+        if label:
+            text += f"\n{label}"
+
     return _send(token, chat_id, text)
 
 

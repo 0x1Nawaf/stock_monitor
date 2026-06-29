@@ -180,6 +180,17 @@ def format_text(
         )
         if r.ensemble_agreement > 0:
             lines.append(f"  Ensemble agreement: {r.ensemble_agreement:.0%}")
+        if r.market_structure:
+            struct_labels = {
+                "bullish_bos": "BOS (bullish continuation)",
+                "bearish_bos": "BOS (bearish continuation)",
+                "bullish_mss": "MSS (bullish reversal)",
+                "bearish_mss": "MSS (bearish reversal)",
+                "bullish": "Bullish",
+                "bearish": "Bearish",
+                "neutral": "Neutral",
+            }
+            lines.append(f"  Market Structure: {struct_labels.get(r.market_structure, r.market_structure)}")
         for reason in r.reasons:
             lines.append(f"    {reason}")
 
